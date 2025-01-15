@@ -1,18 +1,24 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2021 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 import re
 import abc
 import codecs
-import typing
 import logging
 import collections
-from typing import TYPE_CHECKING, Set, Dict, List, Union, Optional
+from typing import TYPE_CHECKING, Union, Optional
 
 if TYPE_CHECKING:
     # circular import, otherwise
@@ -79,8 +85,8 @@ class Result:
         self,
         success: bool,
         statement: Union["capa.engine.Statement", "Feature"],
-        children: List["Result"],
-        locations: Optional[Set[Address]] = None,
+        children: list["Result"],
+        locations: Optional[set[Address]] = None,
     ):
         super().__init__()
         self.success = success
@@ -100,7 +106,10 @@ class Result:
         return self.success
 
 
-class Feature(abc.ABC):
+class Feature(abc.ABC):  # noqa: B024
+    # this is an abstract class, since we don't want anyone to instantiate it directly,
+    # but it doesn't have any abstract methods.
+
     def __init__(
         self,
         value: Union[str, int, float, bytes],
@@ -124,12 +133,17 @@ class Feature(abc.ABC):
         return self.name == other.name and self.value == other.value
 
     def __lt__(self, other):
-        # TODO: this is a huge hack!
+        # implementing sorting by serializing to JSON is a huge hack.
+        # it's slow, inelegant, and probably doesn't work intuitively;
+        # however, we only use it for deterministic output, so it's good enough for now.
+
+        # circular import
+        # we should fix if this wasn't already a huge hack.
         import capa.features.freeze.features
 
         return (
-            capa.features.freeze.features.feature_from_capa(self).json()
-            < capa.features.freeze.features.feature_from_capa(other).json()
+            capa.features.freeze.features.feature_from_capa(self).model_dump_json()
+            < capa.features.freeze.features.feature_from_capa(other).model_dump_json()
         )
 
     def get_name_str(self) -> str:
@@ -158,10 +172,10 @@ class Feature(abc.ABC):
     def __repr__(self):
         return str(self)
 
-    def evaluate(self, ctx: Dict["Feature", Set[Address]], **kwargs) -> Result:
+    def evaluate(self, features: "capa.engine.FeatureSet", short_circuit=True) -> Result:
         capa.perf.counters["evaluate.feature"] += 1
         capa.perf.counters["evaluate.feature." + self.name] += 1
-        return Result(self in ctx, self, [], locations=ctx.get(self, set()))
+        return Result(self in features, self, [], locations=features.get(self, set()))
 
 
 class MatchedRule(Feature):
@@ -199,16 +213,16 @@ class Substring(String):
         super().__init__(value, description=description)
         self.value = value
 
-    def evaluate(self, ctx, short_circuit=True):
+    def evaluate(self, features: "capa.engine.FeatureSet", short_circuit=True):
         capa.perf.counters["evaluate.feature"] += 1
         capa.perf.counters["evaluate.feature.substring"] += 1
 
         # mapping from string value to list of locations.
         # will unique the locations later on.
-        matches: typing.DefaultDict[str, Set[Address]] = collections.defaultdict(set)
+        matches: collections.defaultdict[str, set[Address]] = collections.defaultdict(set)
 
         assert isinstance(self.value, str)
-        for feature, locations in ctx.items():
+        for feature, locations in features.items():
             if not isinstance(feature, (String,)):
                 continue
 
@@ -219,7 +233,7 @@ class Substring(String):
             if self.value in feature.value:
                 matches[feature.value].update(locations)
                 if short_circuit:
-                    # we found one matching string, thats sufficient to match.
+                    # we found one matching string, that's sufficient to match.
                     # don't collect other matching strings in this mode.
                     break
 
@@ -253,7 +267,7 @@ class _MatchedSubstring(Substring):
     note: this type should only ever be constructed by `Substring.evaluate()`. it is not part of the public API.
     """
 
-    def __init__(self, substring: Substring, matches: Dict[str, Set[Address]]):
+    def __init__(self, substring: Substring, matches: dict[str, set[Address]]):
         """
         args:
           substring: the substring feature that matches.
@@ -267,7 +281,7 @@ class _MatchedSubstring(Substring):
         self.matches = matches
 
     def __str__(self):
-        matches = ", ".join(map(lambda s: '"' + s + '"', (self.matches or {}).keys()))
+        matches = ", ".join(f'"{s}"' for s in (self.matches or {}).keys())
         assert isinstance(self.value, str)
         return f'substring("{self.value}", matches = {matches})'
 
@@ -291,15 +305,15 @@ class Regex(String):
                 f"invalid regular expression: {value} it should use Python syntax, try it at https://pythex.org"
             ) from exc
 
-    def evaluate(self, ctx, short_circuit=True):
+    def evaluate(self, features: "capa.engine.FeatureSet", short_circuit=True):
         capa.perf.counters["evaluate.feature"] += 1
         capa.perf.counters["evaluate.feature.regex"] += 1
 
         # mapping from string value to list of locations.
         # will unique the locations later on.
-        matches: typing.DefaultDict[str, Set[Address]] = collections.defaultdict(set)
+        matches: collections.defaultdict[str, set[Address]] = collections.defaultdict(set)
 
-        for feature, locations in ctx.items():
+        for feature, locations in features.items():
             if not isinstance(feature, (String,)):
                 continue
 
@@ -314,7 +328,7 @@ class Regex(String):
             if self.re.search(feature.value):
                 matches[feature.value].update(locations)
                 if short_circuit:
-                    # we found one matching string, thats sufficient to match.
+                    # we found one matching string, that's sufficient to match.
                     # don't collect other matching strings in this mode.
                     break
 
@@ -345,7 +359,7 @@ class _MatchedRegex(Regex):
     note: this type should only ever be constructed by `Regex.evaluate()`. it is not part of the public API.
     """
 
-    def __init__(self, regex: Regex, matches: Dict[str, Set[Address]]):
+    def __init__(self, regex: Regex, matches: dict[str, set[Address]]):
         """
         args:
           regex: the regex feature that matches.
@@ -359,7 +373,7 @@ class _MatchedRegex(Regex):
         self.matches = matches
 
     def __str__(self):
-        matches = ", ".join(map(lambda s: '"' + s + '"', (self.matches or {}).keys()))
+        matches = ", ".join(f'"{s}"' for s in (self.matches or {}).keys())
         assert isinstance(self.value, str)
         return f"regex(string =~ {self.value}, matches = {matches})"
 
@@ -376,12 +390,14 @@ class Bytes(Feature):
         super().__init__(value, description=description)
         self.value = value
 
-    def evaluate(self, ctx, **kwargs):
+    def evaluate(self, features: "capa.engine.FeatureSet", short_circuit=True):
+        assert isinstance(self.value, bytes)
+
         capa.perf.counters["evaluate.feature"] += 1
         capa.perf.counters["evaluate.feature.bytes"] += 1
+        capa.perf.counters["evaluate.feature.bytes." + str(len(self.value))] += 1
 
-        assert isinstance(self.value, bytes)
-        for feature, locations in ctx.items():
+        for feature, locations in features.items():
             if not isinstance(feature, (Bytes,)):
                 continue
 
@@ -399,9 +415,10 @@ class Bytes(Feature):
 # other candidates here: https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#machine-types
 ARCH_I386 = "i386"
 ARCH_AMD64 = "amd64"
+ARCH_AARCH64 = "aarch64"
 # dotnet
 ARCH_ANY = "any"
-VALID_ARCH = (ARCH_I386, ARCH_AMD64, ARCH_ANY)
+VALID_ARCH = (ARCH_I386, ARCH_AMD64, ARCH_AARCH64, ARCH_ANY)
 
 
 class Arch(Feature):
@@ -413,10 +430,11 @@ class Arch(Feature):
 OS_WINDOWS = "windows"
 OS_LINUX = "linux"
 OS_MACOS = "macos"
+OS_ANDROID = "android"
 # dotnet
 OS_ANY = "any"
 VALID_OS = {os.value for os in capa.features.extractors.elf.OS}
-VALID_OS.update({OS_WINDOWS, OS_LINUX, OS_MACOS, OS_ANY})
+VALID_OS.update({OS_WINDOWS, OS_LINUX, OS_MACOS, OS_ANY, OS_ANDROID})
 # internal only, not to be used in rules
 OS_AUTO = "auto"
 
@@ -426,11 +444,11 @@ class OS(Feature):
         super().__init__(value, description=description)
         self.name = "os"
 
-    def evaluate(self, ctx, **kwargs):
+    def evaluate(self, features: "capa.engine.FeatureSet", short_circuit=True):
         capa.perf.counters["evaluate.feature"] += 1
         capa.perf.counters["evaluate.feature." + self.name] += 1
 
-        for feature, locations in ctx.items():
+        for feature, locations in features.items():
             if not isinstance(feature, (OS,)):
                 continue
 
@@ -449,7 +467,31 @@ VALID_FORMAT = (FORMAT_PE, FORMAT_ELF, FORMAT_DOTNET)
 FORMAT_AUTO = "auto"
 FORMAT_SC32 = "sc32"
 FORMAT_SC64 = "sc64"
+FORMAT_CAPE = "cape"
+FORMAT_DRAKVUF = "drakvuf"
+FORMAT_VMRAY = "vmray"
+FORMAT_BINEXPORT2 = "binexport2"
 FORMAT_FREEZE = "freeze"
+FORMAT_RESULT = "result"
+FORMAT_BINJA_DB = "binja_database"
+STATIC_FORMATS = {
+    FORMAT_SC32,
+    FORMAT_SC64,
+    FORMAT_PE,
+    FORMAT_ELF,
+    FORMAT_DOTNET,
+    FORMAT_FREEZE,
+    FORMAT_RESULT,
+    FORMAT_BINEXPORT2,
+    FORMAT_BINJA_DB,
+}
+DYNAMIC_FORMATS = {
+    FORMAT_CAPE,
+    FORMAT_DRAKVUF,
+    FORMAT_VMRAY,
+    FORMAT_FREEZE,
+    FORMAT_RESULT,
+}
 FORMAT_UNKNOWN = "unknown"
 
 
@@ -462,6 +504,6 @@ class Format(Feature):
 def is_global_feature(feature):
     """
     is this a feature that is extracted at every scope?
-    today, these are OS and arch features.
+    today, these are OS, arch, and format features.
     """
-    return isinstance(feature, (OS, Arch))
+    return isinstance(feature, (OS, Arch, Format))

@@ -1,18 +1,27 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2021 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
-import json
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import datetime
 import contextlib
 from typing import Optional
+from pathlib import Path
 
 import idc
 import idaapi
+import ida_ida
+import ida_nalt
 import idautils
 import ida_bytes
 import ida_loader
@@ -22,7 +31,8 @@ import capa
 import capa.version
 import capa.render.utils as rutils
 import capa.features.common
-import capa.render.result_document
+import capa.features.freeze
+import capa.render.result_document as rdoc
 from capa.features.address import AbsoluteVirtualAddress
 
 logger = logging.getLogger("capa")
@@ -44,23 +54,68 @@ NETNODE_RESULTS = "results"
 NETNODE_RULES_CACHE_ID = "rules-cache-id"
 
 
+# wrappers for IDA Pro (IDAPython) 7, 8 and 9 compability
+version = float(idaapi.get_kernel_version())
+if version < 9.0:
+
+    def get_filetype() -> "ida_ida.filetype_t":
+        return idaapi.get_inf_structure().filetype
+
+    def get_processor_name() -> str:
+        return idaapi.get_inf_structure().procname
+
+    def is_32bit() -> bool:
+        info: idaapi.idainfo = idaapi.get_inf_structure()
+        return info.is_32bit()
+
+    def is_64bit() -> bool:
+        info: idaapi.idainfo = idaapi.get_inf_structure()
+        return info.is_64bit()
+
+    def retrieve_input_file_md5() -> str:
+        return ida_nalt.retrieve_input_file_md5()
+
+    def retrieve_input_file_sha256() -> str:
+        return ida_nalt.retrieve_input_file_sha256()
+
+else:
+
+    def get_filetype() -> "ida_ida.filetype_t":
+        return ida_ida.inf_get_filetype()
+
+    def get_processor_name() -> str:
+        return idc.get_processor_name()
+
+    def is_32bit() -> bool:
+        return idaapi.inf_is_32bit_exactly()
+
+    def is_64bit() -> bool:
+        return idaapi.inf_is_64bit()
+
+    def retrieve_input_file_md5() -> str:
+        return ida_nalt.retrieve_input_file_md5().hex()
+
+    def retrieve_input_file_sha256() -> str:
+        return ida_nalt.retrieve_input_file_sha256().hex()
+
+
 def inform_user_ida_ui(message):
-    idaapi.info(f"{message}. Please refer to IDA Output window for more information.")
+    # this isn't a logger, this is IDA's logging facility
+    idaapi.info(f"{message}. Please refer to IDA Output window for more information.")  # noqa: G004
 
 
 def is_supported_ida_version():
     version = float(idaapi.get_kernel_version())
-    if version < 7.4 or version >= 9:
+    if version < 7.4 or version >= 10:
         warning_msg = "This plugin does not support your IDA Pro version"
         logger.warning(warning_msg)
-        logger.warning("Your IDA Pro version is: %s. Supported versions are: IDA >= 7.4 and IDA < 9.0." % version)
+        logger.warning("Your IDA Pro version is: %s. Supported versions are: IDA >= 7.4 and IDA < 10.0.", version)
         return False
     return True
 
 
 def is_supported_file_type():
-    file_info = idaapi.get_inf_structure()
-    if file_info.filetype not in SUPPORTED_FILE_TYPES:
+    if get_filetype() not in SUPPORTED_FILE_TYPES:
         logger.error("-" * 80)
         logger.error(" Input file does not appear to be a supported file type.")
         logger.error(" ")
@@ -74,8 +129,7 @@ def is_supported_file_type():
 
 
 def is_supported_arch_type():
-    file_info = idaapi.get_inf_structure()
-    if file_info.procname not in SUPPORTED_ARCH_TYPES or not any((file_info.is_32bit(), file_info.is_64bit())):
+    if get_processor_name() not in SUPPORTED_ARCH_TYPES or not any((is_32bit(), is_64bit())):
         logger.error("-" * 80)
         logger.error(" Input file does not appear to target a supported architecture.")
         logger.error(" ")
@@ -118,15 +172,15 @@ def get_file_sha256():
     return sha256
 
 
-def collect_metadata(rules):
+def collect_metadata(rules: list[Path]):
     """ """
     md5 = get_file_md5()
     sha256 = get_file_sha256()
 
-    info: idaapi.idainfo = idaapi.get_inf_structure()
-    if info.procname == "metapc" and info.is_64bit():
+    procname = get_processor_name()
+    if procname == "metapc" and is_64bit():
         arch = "x86_64"
-    elif info.procname == "metapc" and info.is_32bit():
+    elif procname == "metapc" and is_32bit():
         arch = "x86"
     else:
         arch = "unknown arch"
@@ -140,37 +194,36 @@ def collect_metadata(rules):
     else:
         os = "unknown os"
 
-    return {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "argv": [],
-        "sample": {
-            "md5": md5,
-            "sha1": "",  # not easily accessible
-            "sha256": sha256,
-            "path": idaapi.get_input_file_path(),
-        },
-        "analysis": {
-            "format": idaapi.get_file_type_name(),
-            "arch": arch,
-            "os": os,
-            "extractor": "ida",
-            "rules": rules,
-            "base_address": idaapi.get_imagebase(),
-            "layout": {
+    return rdoc.Metadata(
+        timestamp=datetime.datetime.now(),
+        version=capa.version.__version__,
+        argv=(),
+        sample=rdoc.Sample(
+            md5=md5,
+            sha1="",  # not easily accessible
+            sha256=sha256,
+            path=idaapi.get_input_file_path(),
+        ),
+        flavor=rdoc.Flavor.STATIC,
+        analysis=rdoc.StaticAnalysis(
+            format=idaapi.get_file_type_name(),
+            arch=arch,
+            os=os,
+            extractor="ida",
+            rules=tuple(r.resolve().absolute().as_posix() for r in rules),
+            base_address=capa.features.freeze.Address.from_capa(AbsoluteVirtualAddress(idaapi.get_imagebase())),
+            layout=rdoc.StaticLayout(
+                functions=(),
                 # this is updated after capabilities have been collected.
                 # will look like:
                 #
                 # "functions": { 0x401000: { "matched_basic_blocks": [ 0x401000, 0x401005, ... ] }, ... }
-            },
+            ),
             # ignore these for now - not used by IDA plugin.
-            "feature_counts": {
-                "file": {},
-                "functions": {},
-            },
-            "library_functions": {},
-        },
-        "version": capa.version.__version__,
-    }
+            feature_counts=rdoc.StaticFeatureCounts(file=0, functions=()),
+            library_functions=(),
+        ),
+    )
 
 
 class IDAIO:
@@ -213,16 +266,16 @@ def idb_contains_cached_results() -> bool:
         n = netnode.Netnode(CAPA_NETNODE)
         return bool(n.get(NETNODE_RESULTS))
     except netnode.NetnodeCorruptError as e:
-        logger.error("%s", e, exc_info=True)
+        logger.exception(str(e))
         return False
 
 
-def load_and_verify_cached_results() -> Optional[capa.render.result_document.ResultDocument]:
+def load_and_verify_cached_results() -> Optional[rdoc.ResultDocument]:
     """verifies that cached results have valid (mapped) addresses for the current database"""
     logger.debug("loading cached capa results from netnode '%s'", CAPA_NETNODE)
 
     n = netnode.Netnode(CAPA_NETNODE)
-    doc = capa.render.result_document.ResultDocument.parse_obj(json.loads(n[NETNODE_RESULTS]))
+    doc = rdoc.ResultDocument.model_validate_json(n[NETNODE_RESULTS])
 
     for rule in rutils.capability_rules(doc):
         for location_, _ in rule.matches:

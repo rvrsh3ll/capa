@@ -1,14 +1,21 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 import string
 import struct
-from typing import Tuple, Iterator
+from typing import Iterator
 
 import envi
 import envi.archs.i386.disasm
@@ -20,7 +27,7 @@ from capa.features.extractors.helpers import MIN_STACKSTRING_LEN
 from capa.features.extractors.base_extractor import BBHandle, FunctionHandle
 
 
-def interface_extract_basic_block_XXX(f: FunctionHandle, bb: BBHandle) -> Iterator[Tuple[Feature, Address]]:
+def interface_extract_basic_block_XXX(f: FunctionHandle, bb: BBHandle) -> Iterator[tuple[Feature, Address]]:
     """
     parse features from the given basic block.
 
@@ -47,7 +54,7 @@ def _bb_has_tight_loop(f, bb):
     return False
 
 
-def extract_bb_tight_loop(f: FunctionHandle, bb: BBHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_bb_tight_loop(f: FunctionHandle, bb: BBHandle) -> Iterator[tuple[Feature, Address]]:
     """check basic block for tight loop indicators"""
     if _bb_has_tight_loop(f, bb.inner):
         yield Characteristic("tight loop"), bb.address
@@ -70,7 +77,7 @@ def _bb_has_stackstring(f, bb):
     return False
 
 
-def extract_stackstring(f: FunctionHandle, bb: BBHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_stackstring(f: FunctionHandle, bb: BBHandle) -> Iterator[tuple[Feature, Address]]:
     """check basic block for stackstring indicators"""
     if _bb_has_stackstring(f, bb.inner):
         yield Characteristic("stack string"), bb.address
@@ -92,7 +99,6 @@ def is_mov_imm_to_stack(instr: envi.archs.i386.disasm.i386Opcode) -> bool:
     if not src.isImmed():
         return False
 
-    # TODO what about 64-bit operands?
     if not isinstance(dst, envi.archs.i386.disasm.i386SibOper) and not isinstance(
         dst, envi.archs.i386.disasm.i386RegMemOper
     ):
@@ -141,12 +147,12 @@ def is_printable_ascii(chars: bytes) -> bool:
 
 
 def is_printable_utf16le(chars: bytes) -> bool:
-    if all(c == b"\x00" for c in chars[1::2]):
+    if all(c == 0x0 for c in chars[1::2]):
         return is_printable_ascii(chars[::2])
     return False
 
 
-def extract_features(f: FunctionHandle, bb: BBHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_features(f: FunctionHandle, bb: BBHandle) -> Iterator[tuple[Feature, Address]]:
     """
     extract features from the given basic block.
 
@@ -155,7 +161,7 @@ def extract_features(f: FunctionHandle, bb: BBHandle) -> Iterator[Tuple[Feature,
       bb (viv_utils.BasicBlock): the basic block to process.
 
     yields:
-      Tuple[Feature, int]: the features and their location found in this basic block.
+      tuple[Feature, int]: the features and their location found in this basic block.
     """
     yield BasicBlock(), AbsoluteVirtualAddress(bb.inner.va)
     for bb_handler in BASIC_BLOCK_HANDLERS:

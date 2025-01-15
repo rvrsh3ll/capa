@@ -1,16 +1,23 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2023 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 from __future__ import annotations
 
 import itertools
 import collections
-from typing import Set, Dict, List, Tuple, Union, Optional
+from typing import Union, Optional
 
 import capa.engine
 from capa.rules import Scope, RuleSet
@@ -34,34 +41,36 @@ class CapaRuleGenFeatureCacheNode:
             self.parent.children.add(self)
 
         self.features: FeatureSet = collections.defaultdict(set)
-        self.children: Set[CapaRuleGenFeatureCacheNode] = set()
+        self.children: set[CapaRuleGenFeatureCacheNode] = set()
 
     def __hash__(self):
-        # TODO: unique enough?
+        # TODO(mike-hunhoff): confirm this is unique enough
+        # https://github.com/mandiant/capa/issues/1604
         return hash((self.address,))
 
     def __eq__(self, other):
         if not isinstance(other, type(self)):
             return NotImplemented
-        # TODO: unique enough?
+        # TODO(mike-hunhoff): confirm this is unique enough
+        # https://github.com/mandiant/capa/issues/1604
         return self.address == other.address
 
 
 class CapaRuleGenFeatureCache:
-    def __init__(self, fh_list: List[FunctionHandle], extractor: CapaExplorerFeatureExtractor):
+    def __init__(self, extractor: CapaExplorerFeatureExtractor):
+        self.extractor = extractor
         self.global_features: FeatureSet = collections.defaultdict(set)
 
         self.file_node: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(None, None)
-        self.func_nodes: Dict[Address, CapaRuleGenFeatureCacheNode] = {}
-        self.bb_nodes: Dict[Address, CapaRuleGenFeatureCacheNode] = {}
-        self.insn_nodes: Dict[Address, CapaRuleGenFeatureCacheNode] = {}
+        self.func_nodes: dict[Address, CapaRuleGenFeatureCacheNode] = {}
+        self.bb_nodes: dict[Address, CapaRuleGenFeatureCacheNode] = {}
+        self.insn_nodes: dict[Address, CapaRuleGenFeatureCacheNode] = {}
 
-        self._find_global_features(extractor)
-        self._find_file_features(extractor)
-        self._find_function_and_below_features(fh_list, extractor)
+        self._find_global_features()
+        self._find_file_features()
 
-    def _find_global_features(self, extractor: CapaExplorerFeatureExtractor):
-        for feature, addr in extractor.extract_global_features():
+    def _find_global_features(self):
+        for feature, addr in self.extractor.extract_global_features():
             # not all global features may have virtual addresses.
             # if not, then at least ensure the feature shows up in the index.
             # the set of addresses will still be empty.
@@ -71,50 +80,49 @@ class CapaRuleGenFeatureCache:
                 if feature not in self.global_features:
                     self.global_features[feature] = set()
 
-    def _find_file_features(self, extractor: CapaExplorerFeatureExtractor):
+    def _find_file_features(self):
         # not all file features may have virtual addresses.
         # if not, then at least ensure the feature shows up in the index.
         # the set of addresses will still be empty.
-        for feature, addr in extractor.extract_file_features():
+        for feature, addr in self.extractor.extract_file_features():
             if addr is not None:
                 self.file_node.features[feature].add(addr)
             else:
                 if feature not in self.file_node.features:
                     self.file_node.features[feature] = set()
 
-    def _find_function_and_below_features(self, fh_list: List[FunctionHandle], extractor: CapaExplorerFeatureExtractor):
-        for fh in fh_list:
-            f_node: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(fh, self.file_node)
+    def _find_function_and_below_features(self, fh: FunctionHandle):
+        f_node: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(fh, self.file_node)
 
-            # extract basic block and below features
-            for bbh in extractor.get_basic_blocks(fh):
-                bb_node: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(bbh, f_node)
+        # extract basic block and below features
+        for bbh in self.extractor.get_basic_blocks(fh):
+            bb_node: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(bbh, f_node)
 
-                # extract instruction features
-                for ih in extractor.get_instructions(fh, bbh):
-                    inode: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(ih, bb_node)
+            # extract instruction features
+            for ih in self.extractor.get_instructions(fh, bbh):
+                inode: CapaRuleGenFeatureCacheNode = CapaRuleGenFeatureCacheNode(ih, bb_node)
 
-                    for feature, addr in extractor.extract_insn_features(fh, bbh, ih):
-                        inode.features[feature].add(addr)
+                for feature, addr in self.extractor.extract_insn_features(fh, bbh, ih):
+                    inode.features[feature].add(addr)
 
-                    self.insn_nodes[inode.address] = inode
+                self.insn_nodes[inode.address] = inode
 
-                # extract basic block features
-                for feature, addr in extractor.extract_basic_block_features(fh, bbh):
-                    bb_node.features[feature].add(addr)
+            # extract basic block features
+            for feature, addr in self.extractor.extract_basic_block_features(fh, bbh):
+                bb_node.features[feature].add(addr)
 
-                # store basic block features in cache and function parent
-                self.bb_nodes[bb_node.address] = bb_node
+            # store basic block features in cache and function parent
+            self.bb_nodes[bb_node.address] = bb_node
 
-            # extract function features
-            for feature, addr in extractor.extract_function_features(fh):
-                f_node.features[feature].add(addr)
+        # extract function features
+        for feature, addr in self.extractor.extract_function_features(fh):
+            f_node.features[feature].add(addr)
 
-            self.func_nodes[f_node.address] = f_node
+        self.func_nodes[f_node.address] = f_node
 
     def _find_instruction_capabilities(
         self, ruleset: RuleSet, insn: CapaRuleGenFeatureCacheNode
-    ) -> Tuple[FeatureSet, MatchResults]:
+    ) -> tuple[FeatureSet, MatchResults]:
         features: FeatureSet = collections.defaultdict(set)
 
         for feature, locs in itertools.chain(insn.features.items(), self.global_features.items()):
@@ -130,7 +138,7 @@ class CapaRuleGenFeatureCache:
 
     def _find_basic_block_capabilities(
         self, ruleset: RuleSet, bb: CapaRuleGenFeatureCacheNode
-    ) -> Tuple[FeatureSet, MatchResults, MatchResults]:
+    ) -> tuple[FeatureSet, MatchResults, MatchResults]:
         features: FeatureSet = collections.defaultdict(set)
         insn_matches: MatchResults = collections.defaultdict(list)
 
@@ -154,8 +162,8 @@ class CapaRuleGenFeatureCache:
 
     def find_code_capabilities(
         self, ruleset: RuleSet, fh: FunctionHandle
-    ) -> Tuple[FeatureSet, MatchResults, MatchResults, MatchResults]:
-        f_node: Optional[CapaRuleGenFeatureCacheNode] = self.func_nodes.get(fh.address, None)
+    ) -> tuple[FeatureSet, MatchResults, MatchResults, MatchResults]:
+        f_node: Optional[CapaRuleGenFeatureCacheNode] = self._get_cached_func_node(fh)
         if f_node is None:
             return {}, {}, {}, {}
 
@@ -178,7 +186,7 @@ class CapaRuleGenFeatureCache:
         _, function_matches = ruleset.match(Scope.FUNCTION, function_features, f_node.address)
         return function_features, function_matches, bb_matches, insn_matches
 
-    def find_file_capabilities(self, ruleset: RuleSet) -> Tuple[FeatureSet, MatchResults]:
+    def find_file_capabilities(self, ruleset: RuleSet) -> tuple[FeatureSet, MatchResults]:
         features: FeatureSet = collections.defaultdict(set)
 
         for func_node in self.file_node.children:
@@ -195,8 +203,16 @@ class CapaRuleGenFeatureCache:
         _, matches = ruleset.match(Scope.FILE, features, NO_ADDRESS)
         return features, matches
 
+    def _get_cached_func_node(self, fh: FunctionHandle) -> Optional[CapaRuleGenFeatureCacheNode]:
+        f_node: Optional[CapaRuleGenFeatureCacheNode] = self.func_nodes.get(fh.address)
+        if f_node is None:
+            # function is not in our cache, do extraction now
+            self._find_function_and_below_features(fh)
+            f_node = self.func_nodes.get(fh.address)
+        return f_node
+
     def get_all_function_features(self, fh: FunctionHandle) -> FeatureSet:
-        f_node: Optional[CapaRuleGenFeatureCacheNode] = self.func_nodes.get(fh.address, None)
+        f_node: Optional[CapaRuleGenFeatureCacheNode] = self._get_cached_func_node(fh)
         if f_node is None:
             return {}
 

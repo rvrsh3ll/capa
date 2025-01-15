@@ -1,3 +1,17 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Reformat the given capa rule into a consistent style.
 Use the -i flag to update the rule in-place.
@@ -5,19 +19,14 @@ Use the -i flag to update the rule in-place.
 Usage:
 
    $ python capafmt.py -i foo.yml
-
-Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
-You may obtain a copy of the License at: [package root]/LICENSE.txt
-Unless required by applicable law or agreed to in writing, software distributed under the License
- is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and limitations under the License.
 """
+
 import sys
 import logging
 import argparse
+from pathlib import Path
 
+import capa.main
 import capa.rules
 
 logger = logging.getLogger("capafmt")
@@ -28,6 +37,7 @@ def main(argv=None):
         argv = sys.argv[1:]
 
     parser = argparse.ArgumentParser(description="Capa rule formatter.")
+    capa.main.install_common_args(parser)
     parser.add_argument("path", type=str, help="Path to rule to format")
     parser.add_argument(
         "-i",
@@ -36,8 +46,6 @@ def main(argv=None):
         dest="in_place",
         help="Format the rule in place, otherwise, write formatted rule to STDOUT",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Disable all output but errors")
     parser.add_argument(
         "-c",
         "--check",
@@ -46,15 +54,10 @@ def main(argv=None):
     )
     args = parser.parse_args(args=argv)
 
-    if args.verbose:
-        level = logging.DEBUG
-    elif args.quiet:
-        level = logging.ERROR
-    else:
-        level = logging.INFO
-
-    logging.basicConfig(level=level)
-    logging.getLogger("capafmt").setLevel(level)
+    try:
+        capa.main.handle_common_args(args)
+    except capa.main.ShouldExitError as e:
+        return e.status_code
 
     rule = capa.rules.Rule.from_yaml_file(args.path, use_ruamel=True)
     reformatted_rule = rule.to_yaml()
@@ -70,8 +73,7 @@ def main(argv=None):
             return 1
 
     if args.in_place:
-        with open(args.path, "wb") as f:
-            f.write(reformatted_rule.encode("utf-8"))
+        Path(args.path).write_bytes(reformatted_rule.encode("utf-8"))
     else:
         print(reformatted_rule)
 

@@ -1,11 +1,18 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
-from typing import List, Tuple, Callable, Iterator
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Callable, Iterator
 
 import envi
 import envi.exc
@@ -22,6 +29,7 @@ import capa.features.extractors.viv.helpers
 from capa.features.insn import API, MAX_STRUCTURE_SIZE, Number, Offset, Mnemonic, OperandNumber, OperandOffset
 from capa.features.common import MAX_BYTES_FEATURE_SIZE, THUNK_CHAIN_DEPTH_DELTA, Bytes, String, Feature, Characteristic
 from capa.features.address import Address, AbsoluteVirtualAddress
+from capa.features.extractors.elf import SymTab
 from capa.features.extractors.base_extractor import BBHandle, InsnHandle, FunctionHandle
 from capa.features.extractors.viv.indirect_calls import NotFoundError, resolve_indirect_call
 
@@ -32,7 +40,7 @@ SECURITY_COOKIE_BYTES_DELTA = 0x40
 
 def interface_extract_instruction_XXX(
     fh: FunctionHandle, bbh: BBHandle, ih: InsnHandle
-) -> Iterator[Tuple[Feature, Address]]:
+) -> Iterator[tuple[Feature, Address]]:
     """
     parse features from the given instruction.
 
@@ -52,7 +60,7 @@ def get_imports(vw):
     caching accessor to vivisect workspace imports
     avoids performance issues in vivisect when collecting locations
 
-    returns: Dict[int, Tuple[str, str]]
+    returns: dict[int, tuple[str, str]]
     """
     if "imports" in vw.metadata:
         return vw.metadata["imports"]
@@ -64,7 +72,7 @@ def get_imports(vw):
         return imports
 
 
-def extract_insn_api_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_api_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     parse API features from the given instruction.
 
@@ -108,6 +116,26 @@ def extract_insn_api_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterato
         target = capa.features.extractors.viv.helpers.get_coderef_from(f.vw, insn.va)
         if not target:
             return
+
+        if f.vw.metadata["Format"] == "elf":
+            if "symtab" not in fh.ctx["cache"]:
+                # the symbol table gets stored as a function's attribute in order to avoid running
+                # this code every time the call is made, thus preventing the computational overhead.
+                try:
+                    fh.ctx["cache"]["symtab"] = SymTab.from_viv(f.vw.parsedbin)
+                except Exception:
+                    fh.ctx["cache"]["symtab"] = None
+
+            symtab = fh.ctx["cache"]["symtab"]
+            if symtab:
+                for symbol in symtab.get_symbols():
+                    sym_name = symtab.get_name(symbol)
+                    sym_value = symbol.value
+                    sym_info = symbol.info
+
+                    STT_FUNC = 0x2
+                    if sym_value == target and sym_info & STT_FUNC != 0:
+                        yield API(sym_name), ih.address
 
         if viv_utils.flirt.is_library_function(f.vw, target):
             name = viv_utils.get_function_name(f.vw, target)
@@ -239,7 +267,7 @@ def read_bytes(vw, va: int) -> bytes:
         raise
 
 
-def extract_insn_bytes_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_bytes_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     parse byte sequence features from the given instruction.
     example:
@@ -267,16 +295,16 @@ def extract_insn_bytes_features(fh: FunctionHandle, bb, ih: InsnHandle) -> Itera
         else:
             continue
 
-        for v in derefs(f.vw, v):
+        for vv in derefs(f.vw, v):
             try:
-                buf = read_bytes(f.vw, v)
+                buf = read_bytes(f.vw, vv)
             except envi.exc.SegmentationViolation:
                 continue
 
             if capa.features.extractors.helpers.all_zeros(buf):
                 continue
 
-            if f.vw.isProbablyString(v) or f.vw.isProbablyUnicode(v):
+            if f.vw.isProbablyString(vv) or f.vw.isProbablyUnicode(vv):
                 # don't extract byte features for obvious strings
                 continue
 
@@ -330,7 +358,6 @@ def is_security_cookie(f, bb, insn) -> bool:
     if oper.isReg() and oper.reg not in [
         envi.archs.i386.regs.REG_ESP,
         envi.archs.i386.regs.REG_EBP,
-        # TODO: do x64 support for real.
         envi.archs.amd64.regs.REG_RBP,
         envi.archs.amd64.regs.REG_RSP,
     ]:
@@ -351,7 +378,7 @@ def is_security_cookie(f, bb, insn) -> bool:
 
 def extract_insn_nzxor_characteristic_features(
     fh: FunctionHandle, bbhandle: BBHandle, ih: InsnHandle
-) -> Iterator[Tuple[Feature, Address]]:
+) -> Iterator[tuple[Feature, Address]]:
     """
     parse non-zeroing XOR instruction from the given instruction.
     ignore expected non-zeroing XORs, e.g. security cookies.
@@ -372,12 +399,12 @@ def extract_insn_nzxor_characteristic_features(
     yield Characteristic("nzxor"), ih.address
 
 
-def extract_insn_mnemonic_features(f, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_mnemonic_features(f, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """parse mnemonic features from the given instruction."""
     yield Mnemonic(ih.inner.mnem), ih.address
 
 
-def extract_insn_obfs_call_plus_5_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_obfs_call_plus_5_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     parse call $+5 instruction from the given instruction.
     """
@@ -390,18 +417,15 @@ def extract_insn_obfs_call_plus_5_characteristic_features(f, bb, ih: InsnHandle)
         if insn.va + 5 == insn.opers[0].getOperValue(insn):
             yield Characteristic("call $+5"), ih.address
 
-    if isinstance(insn.opers[0], envi.archs.i386.disasm.i386ImmMemOper) or isinstance(
-        insn.opers[0], envi.archs.amd64.disasm.Amd64RipRelOper
-    ):
+    if isinstance(insn.opers[0], (envi.archs.i386.disasm.i386ImmMemOper, envi.archs.amd64.disasm.Amd64RipRelOper)):
         if insn.va + 5 == insn.opers[0].getOperAddr(insn):
             yield Characteristic("call $+5"), ih.address
 
 
-def extract_insn_peb_access_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_peb_access_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     parse peb access from the given function. fs:[0x30] on x86, gs:[0x60] on x64
     """
-    # TODO handle where fs/gs are loaded into a register or onto the stack and used later
     insn: envi.Opcode = ih.inner
 
     if insn.mnem not in ["push", "mov"]:
@@ -434,7 +458,7 @@ def extract_insn_peb_access_characteristic_features(f, bb, ih: InsnHandle) -> It
         pass
 
 
-def extract_insn_segment_access_features(f, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_segment_access_features(f, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """parse the instruction for access to fs or gs"""
     insn: envi.Opcode = ih.inner
 
@@ -455,7 +479,7 @@ def get_section(vw, va: int):
     raise KeyError(va)
 
 
-def extract_insn_cross_section_cflow(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_insn_cross_section_cflow(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     inspect the instruction for a CALL or JMP that crosses section boundaries.
     """
@@ -496,7 +520,7 @@ def extract_insn_cross_section_cflow(fh: FunctionHandle, bb, ih: InsnHandle) -> 
 
 # this is a feature that's most relevant at the function scope,
 # however, its most efficient to extract at the instruction scope.
-def extract_function_calls_from(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_function_calls_from(fh: FunctionHandle, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     insn: envi.Opcode = ih.inner
     f: viv_utils.Function = fh.inner
 
@@ -537,7 +561,7 @@ def extract_function_calls_from(fh: FunctionHandle, bb, ih: InsnHandle) -> Itera
 
 # this is a feature that's most relevant at the function or basic block scope,
 # however, its most efficient to extract at the instruction scope.
-def extract_function_indirect_call_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_function_indirect_call_characteristic_features(f, bb, ih: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     """
     extract indirect function call characteristic (e.g., call eax or call dword ptr [edx+4])
     does not include calls like => call ds:dword_ABD4974
@@ -561,7 +585,7 @@ def extract_function_indirect_call_characteristic_features(f, bb, ih: InsnHandle
 
 def extract_op_number_features(
     fh: FunctionHandle, bb, ih: InsnHandle, i, oper: envi.Operand
-) -> Iterator[Tuple[Feature, Address]]:
+) -> Iterator[tuple[Feature, Address]]:
     """parse number features from the given operand.
 
     example:
@@ -581,7 +605,7 @@ def extract_op_number_features(
 
     if f.vw.probeMemory(v, 1, envi.memory.MM_READ):
         # this is a valid address
-        # assume its not also a constant.
+        # assume it's not also a constant.
         return
 
     if insn.mnem == "add" and insn.opers[0].isReg() and insn.opers[0].reg == envi.archs.i386.regs.REG_ESP:
@@ -606,7 +630,7 @@ def extract_op_number_features(
 
 def extract_op_offset_features(
     fh: FunctionHandle, bb, ih: InsnHandle, i, oper: envi.Operand
-) -> Iterator[Tuple[Feature, Address]]:
+) -> Iterator[tuple[Feature, Address]]:
     """parse structure offset features from the given operand."""
     # example:
     #
@@ -625,7 +649,6 @@ def extract_op_offset_features(
         if oper.reg == envi.archs.i386.regs.REG_EBP:
             return
 
-        # TODO: do x64 support for real.
         if oper.reg == envi.archs.amd64.regs.REG_RBP:
             return
 
@@ -658,7 +681,7 @@ def extract_op_offset_features(
 
 def extract_op_string_features(
     fh: FunctionHandle, bb, ih: InsnHandle, i, oper: envi.Operand
-) -> Iterator[Tuple[Feature, Address]]:
+) -> Iterator[tuple[Feature, Address]]:
     """parse string features from the given operand."""
     # example:
     #
@@ -679,9 +702,9 @@ def extract_op_string_features(
     else:
         return
 
-    for v in derefs(f.vw, v):
+    for vv in derefs(f.vw, v):
         try:
-            s = read_string(f.vw, v).rstrip("\x00")
+            s = read_string(f.vw, vv).rstrip("\x00")
         except ValueError:
             continue
         else:
@@ -689,15 +712,15 @@ def extract_op_string_features(
                 yield String(s), ih.address
 
 
-def extract_operand_features(f: FunctionHandle, bb, insn: InsnHandle) -> Iterator[Tuple[Feature, Address]]:
+def extract_operand_features(f: FunctionHandle, bb, insn: InsnHandle) -> Iterator[tuple[Feature, Address]]:
     for i, oper in enumerate(insn.inner.opers):
         for op_handler in OPERAND_HANDLERS:
             for feature, addr in op_handler(f, bb, insn, i, oper):
                 yield feature, addr
 
 
-OPERAND_HANDLERS: List[
-    Callable[[FunctionHandle, BBHandle, InsnHandle, int, envi.Operand], Iterator[Tuple[Feature, Address]]]
+OPERAND_HANDLERS: list[
+    Callable[[FunctionHandle, BBHandle, InsnHandle, int, envi.Operand], Iterator[tuple[Feature, Address]]]
 ] = [
     extract_op_number_features,
     extract_op_offset_features,
@@ -705,7 +728,7 @@ OPERAND_HANDLERS: List[
 ]
 
 
-def extract_features(f, bb, insn) -> Iterator[Tuple[Feature, Address]]:
+def extract_features(f, bb, insn) -> Iterator[tuple[Feature, Address]]:
     """
     extract features from the given insn.
 
@@ -715,14 +738,14 @@ def extract_features(f, bb, insn) -> Iterator[Tuple[Feature, Address]]:
       insn (vivisect...Instruction): the instruction to process.
 
     yields:
-      Tuple[Feature, Address]: the features and their location found in this insn.
+      tuple[Feature, Address]: the features and their location found in this insn.
     """
     for insn_handler in INSTRUCTION_HANDLERS:
         for feature, addr in insn_handler(f, bb, insn):
             yield feature, addr
 
 
-INSTRUCTION_HANDLERS: List[Callable[[FunctionHandle, BBHandle, InsnHandle], Iterator[Tuple[Feature, Address]]]] = [
+INSTRUCTION_HANDLERS: list[Callable[[FunctionHandle, BBHandle, InsnHandle], Iterator[tuple[Feature, Address]]]] = [
     extract_insn_api_features,
     extract_insn_bytes_features,
     extract_insn_nzxor_characteristic_features,

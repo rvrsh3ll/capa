@@ -1,10 +1,24 @@
 name: CI
 
+# tests.yml workflow will run for all changes except:
+# any file or directory under web/ or doc/
+# any Markdown (.md) file anywhere in the repository
+
 on:
   push:
     branches: [ master ]
+    paths-ignore:
+      - 'web/**'
+      - 'doc/**'
+      - '**.md'
   pull_request:
     branches: [ master ]
+    paths-ignore:
+      - 'web/**'
+      - 'doc/**'
+      - '**.md'
+
+permissions: read-all
 
 # save workspaces to speed up testing
 env:
@@ -12,10 +26,10 @@ env:
 
 jobs:
   changelog_format:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout capa
-      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
     # The sync GH action in capa-rules relies on a single '- *$' in the CHANGELOG file
     - name: Ensure CHANGELOG has '- *$'
       run: |
@@ -23,38 +37,47 @@ jobs:
         if [ $number != 1 ]; then exit 1; fi
 
   code_style:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout capa
-      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
-    - name: Set up Python 3.8
-      uses: actions/setup-python@d27e3f3d7c64b4bbf8e4abfb9b63b83e846e0435 # v4.5.0
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    # use latest available python to take advantage of best performance
+    - name: Set up Python 3.12
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
       with:
-        python-version: "3.8"
+        python-version: "3.12"
     - name: Install dependencies
-      run: pip install -e .[dev]
+      run: |
+        pip install -r requirements.txt
+        pip install -e .[dev,scripts]
+    - name: Lint with ruff
+      run: pre-commit run ruff
     - name: Lint with isort
-      run: isort --profile black --length-sort --line-width 120 -c .
+      run: pre-commit run isort --show-diff-on-failure
     - name: Lint with black
-      run: black -l 120 --check .
-    - name: Lint with pycodestyle
-      run: pycodestyle --show-source capa/ scripts/ tests/
+      run: pre-commit run black --show-diff-on-failure
+    - name: Lint with flake8
+      run: pre-commit run flake8 --hook-stage manual
     - name: Check types with mypy
-      run: mypy --config-file .github/mypy/mypy.ini --check-untyped-defs capa/ scripts/ tests/
+      run: pre-commit run mypy --hook-stage manual
+    - name: Check imports against dependencies
+      run: pre-commit run deptry --hook-stage manual
 
   rule_linter:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout capa with submodules
-      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
-    - name: Set up Python 3.8
-      uses: actions/setup-python@d27e3f3d7c64b4bbf8e4abfb9b63b83e846e0435 # v4.5.0
+    - name: Set up Python 3.12
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
       with:
-        python-version: "3.8"
+        python-version: "3.12"
     - name: Install capa
-      run: pip install -e .
+      run: |
+        pip install -r requirements.txt
+        pip install -e .[dev,scripts]
     - name: Run rule linter
       run: python scripts/lint.py rules/
 
@@ -65,28 +88,134 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-20.04, windows-2019, macos-11]
+        os: [ubuntu-20.04, windows-2019, macos-13]
         # across all operating systems
-        python-version: ["3.7", "3.11"]
+        python-version: ["3.10", "3.11"]
         include:
           # on Ubuntu run these as well
           - os: ubuntu-20.04
-            python-version: "3.8"
+            python-version: "3.10"
           - os: ubuntu-20.04
-            python-version: "3.9"
+            python-version: "3.11"
+          - os: ubuntu-20.04
+            python-version: "3.12"
     steps:
     - name: Checkout capa with submodules
-      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@d27e3f3d7c64b4bbf8e4abfb9b63b83e846e0435 # v4.5.0
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install pyyaml
       if: matrix.os == 'ubuntu-20.04'
       run: sudo apt-get install -y libyaml-dev
     - name: Install capa
-      run: pip install -e .[dev]
+      run: |
+        pip install -r requirements.txt
+        pip install -e .[dev,scripts]
+    - name: Run tests (fast)
+      # this set of tests runs about 80% of the cases in 20% of the time,
+      # and should catch most errors quickly.
+      run:  pre-commit run pytest-fast --all-files --hook-stage manual
     - name: Run tests
       run: pytest -v tests/
+
+  binja-tests:
+    name: Binary Ninja tests for ${{ matrix.python-version }}
+    env:
+      BN_SERIAL: ${{ secrets.BN_SERIAL }}
+    runs-on: ubuntu-22.04
+    needs: [tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+    - name: Checkout capa with submodules
+      # do only run if BN_SERIAL is available, have to do this in every step, see https://github.com/orgs/community/discussions/26726#discussioncomment-3253118
+      if: ${{ env.BN_SERIAL != 0 }}
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+    - name: Set up Python ${{ matrix.python-version }}
+      if: ${{ env.BN_SERIAL != 0 }}
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install pyyaml
+      if: ${{ env.BN_SERIAL != 0 }}
+      run: sudo apt-get install -y libyaml-dev
+    - name: Install capa
+      if: ${{ env.BN_SERIAL != 0 }}
+      run: |
+        pip install -r requirements.txt
+        pip install -e .[dev,scripts]
+    - name: install Binary Ninja
+      if: ${{ env.BN_SERIAL != 0 }}
+      run: |
+        mkdir ./.github/binja
+        curl "https://raw.githubusercontent.com/Vector35/binaryninja-api/6812c97/scripts/download_headless.py" -o ./.github/binja/download_headless.py
+        python ./.github/binja/download_headless.py --serial ${{ env.BN_SERIAL }} --output .github/binja/BinaryNinja-headless.zip
+        unzip .github/binja/BinaryNinja-headless.zip -d .github/binja/
+        python .github/binja/binaryninja/scripts/install_api.py --install-on-root --silent
+    - name: Run tests
+      if: ${{ env.BN_SERIAL != 0 }}
+      env:
+        BN_LICENSE: ${{ secrets.BN_LICENSE }}
+      run: pytest -v tests/test_binja_features.py  # explicitly refer to the binja tests for performance. other tests run above.
+
+  ghidra-tests:
+    name: Ghidra tests for ${{ matrix.python-version }}
+    runs-on: ubuntu-20.04
+    needs: [tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+        java-version: ["17"]
+        ghidra-version: ["11.0.1"]
+        public-version: ["PUBLIC_20240130"] # for ghidra releases
+        ghidrathon-version: ["4.0.0"] 
+    steps:
+    - name: Checkout capa with submodules
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: true
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set up Java ${{ matrix.java-version }}
+      uses: actions/setup-java@387ac29b308b003ca37ba93a6cab5eb57c8f5f93 # v4.0.0
+      with:
+        distribution: 'temurin'
+        java-version: ${{ matrix.java-version }}
+    - name: Install Ghidra ${{ matrix.ghidra-version }} 
+      run: |
+        mkdir ./.github/ghidra
+        wget "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${{ matrix.ghidra-version }}_build/ghidra_${{ matrix.ghidra-version }}_${{ matrix.public-version }}.zip" -O ./.github/ghidra/ghidra_${{ matrix.ghidra-version }}_PUBLIC.zip
+        unzip .github/ghidra/ghidra_${{ matrix.ghidra-version }}_PUBLIC.zip -d .github/ghidra/
+    - name: Install Ghidrathon
+      run : |
+        mkdir ./.github/ghidrathon
+        wget "https://github.com/mandiant/Ghidrathon/releases/download/v${{ matrix.ghidrathon-version }}/Ghidrathon-v${{ matrix.ghidrathon-version}}.zip" -O ./.github/ghidrathon/ghidrathon-v${{ matrix.ghidrathon-version }}.zip
+        unzip .github/ghidrathon/ghidrathon-v${{ matrix.ghidrathon-version }}.zip -d .github/ghidrathon/
+        python -m pip install -r .github/ghidrathon/requirements.txt
+        python .github/ghidrathon/ghidrathon_configure.py $(pwd)/.github/ghidra/ghidra_${{ matrix.ghidra-version }}_PUBLIC
+        unzip .github/ghidrathon/Ghidrathon-v${{ matrix.ghidrathon-version }}.zip -d .github/ghidra/ghidra_${{ matrix.ghidra-version }}_PUBLIC/Ghidra/Extensions
+    - name: Install pyyaml
+      run: sudo apt-get install -y libyaml-dev
+    - name: Install capa
+      run: |
+        pip install -r requirements.txt
+        pip install -e .[dev,scripts]
+    - name: Run tests
+      run: | 
+        mkdir ./.github/ghidra/project
+        .github/ghidra/ghidra_${{ matrix.ghidra-version }}_PUBLIC/support/analyzeHeadless .github/ghidra/project ghidra_test -Import ./tests/data/mimikatz.exe_ -ScriptPath ./tests/ -PostScript test_ghidra_features.py > ../output.log
+        cat ../output.log
+        exit_code=$(cat ../output.log | grep exit | awk '{print $NF}')
+        exit $exit_code
+ 

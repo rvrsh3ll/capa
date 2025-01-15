@@ -1,13 +1,19 @@
 #!/usr/bin/env python2
-"""
-Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
-You may obtain a copy of the License at: [package root]/LICENSE.txt
-Unless required by applicable law or agreed to in writing, software distributed under the License
- is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and limitations under the License.
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+"""
 show-features
 
 Show the features that capa extracts from the given sample,
@@ -64,24 +70,25 @@ Example::
     insn: 0x10001027: mnemonic(shl)
     ...
 """
-import os
 import sys
 import logging
-import os.path
 import argparse
 
 import capa.main
 import capa.rules
 import capa.engine
+import capa.loader
 import capa.helpers
 import capa.features
 import capa.exceptions
 import capa.render.verbose as v
-import capa.features.common
 import capa.features.freeze
 import capa.features.address
-import capa.features.extractors.base_extractor
-from capa.helpers import log_unsupported_runtime_error
+import capa.features.extractors.pefile
+from capa.helpers import assert_never
+from capa.features.insn import API, Number
+from capa.features.common import String, Feature, is_global_feature
+from capa.features.extractors.base_extractor import FunctionHandle, StaticFeatureExtractor, DynamicFeatureExtractor
 
 logger = logging.getLogger("capa.show-features")
 
@@ -95,42 +102,38 @@ def main(argv=None):
         argv = sys.argv[1:]
 
     parser = argparse.ArgumentParser(description="Show the features that capa extracts from the given sample")
-    capa.main.install_common_args(parser, wanted={"format", "os", "sample", "signatures", "backend"})
+    capa.main.install_common_args(parser, wanted={"input_file", "format", "os", "signatures", "backend"})
 
     parser.add_argument("-F", "--function", type=str, help="Show features for specific function")
+    parser.add_argument("-P", "--process", type=str, help="Show features for specific process name")
     args = parser.parse_args(args=argv)
-    capa.main.handle_common_args(args)
 
     try:
-        taste = capa.helpers.get_file_taste(args.sample)
-    except IOError as e:
-        logger.error("%s", str(e))
-        return -1
+        capa.main.handle_common_args(args)
+        capa.main.ensure_input_exists_from_cli(args)
 
-    try:
-        sig_paths = capa.main.get_signatures(args.signatures)
-    except IOError as e:
-        logger.error("%s", str(e))
-        return -1
+        if args.function and args.backend == "pefile":
+            print("pefile backend does not support extracting function features")
+            return -1
 
-    if (args.format == "freeze") or (
-        args.format == capa.features.common.FORMAT_AUTO and capa.features.freeze.is_freeze(taste)
-    ):
-        with open(args.sample, "rb") as f:
-            extractor = capa.features.freeze.load(f.read())
+        input_format = capa.main.get_input_format_from_cli(args)
+
+        backend = capa.main.get_backend_from_cli(args, input_format)
+        extractor = capa.main.get_extractor_from_cli(args, input_format, backend)
+    except capa.main.ShouldExitError as e:
+        return e.status_code
+
+    if isinstance(extractor, DynamicFeatureExtractor):
+        print_dynamic_analysis(extractor, args)
+    elif isinstance(extractor, StaticFeatureExtractor):
+        print_static_analysis(extractor, args)
     else:
-        should_save_workspace = os.environ.get("CAPA_SAVE_WORKSPACE") not in ("0", "no", "NO", "n", None)
-        try:
-            extractor = capa.main.get_extractor(
-                args.sample, args.format, args.os, args.backend, sig_paths, should_save_workspace
-            )
-        except capa.exceptions.UnsupportedFormatError:
-            capa.helpers.log_unsupported_format_error()
-            return -1
-        except capa.exceptions.UnsupportedRuntimeError:
-            log_unsupported_runtime_error()
-            return -1
+        assert_never(extractor)
 
+    return 0
+
+
+def print_static_analysis(extractor: StaticFeatureExtractor, args):
     for feature, addr in extractor.extract_global_features():
         print(f"global: {format_address(addr)}: {feature}")
 
@@ -138,11 +141,15 @@ def main(argv=None):
         for feature, addr in extractor.extract_file_features():
             print(f"file: {format_address(addr)}: {feature}")
 
-    function_handles = tuple(extractor.get_functions())
+    function_handles: tuple[FunctionHandle, ...]
+    if isinstance(extractor, capa.features.extractors.pefile.PefileFeatureExtractor):
+        # pefile extractor doesn't extract function features
+        function_handles = ()
+    else:
+        function_handles = tuple(extractor.get_functions())
 
     if args.function:
         if args.format == "freeze":
-            # TODO fix
             function_handles = tuple(filter(lambda fh: fh.address == args.function, function_handles))
         else:
             function_handles = tuple(filter(lambda fh: format_address(fh.address) == args.function, function_handles))
@@ -155,9 +162,109 @@ def main(argv=None):
             print(f"{args.function} not a function")
             return -1
 
-    print_features(function_handles, extractor)
+    print_static_features(function_handles, extractor)
 
-    return 0
+
+def print_dynamic_analysis(extractor: DynamicFeatureExtractor, args):
+    for feature, addr in extractor.extract_global_features():
+        print(f"global: {format_address(addr)}: {feature}")
+
+    if not args.process:
+        for feature, addr in extractor.extract_file_features():
+            print(f"file: {format_address(addr)}: {feature}")
+
+    process_handles = tuple(extractor.get_processes())
+
+    if args.process:
+        process_handles = tuple(filter(lambda ph: extractor.get_process_name(ph) == args.process, process_handles))
+        if args.process not in [extractor.get_process_name(ph) for ph in process_handles]:
+            print(f"{args.process} not a process")
+            return -1
+
+    print_dynamic_features(process_handles, extractor)
+
+
+def print_static_features(functions, extractor: StaticFeatureExtractor):
+    for f in functions:
+        if extractor.is_library_function(f.address):
+            function_name = extractor.get_function_name(f.address)
+            logger.debug("skipping library function %s (%s)", format_address(f.address), function_name)
+            continue
+
+        print(f"func: {format_address(f.address)}")
+
+        for feature, addr in extractor.extract_function_features(f):
+            if is_global_feature(feature):
+                continue
+
+            if f.address != addr:
+                print(f" func: {format_address(f.address)}: {feature} -> {format_address(addr)}")
+            else:
+                print(f" func: {format_address(f.address)}: {feature}")
+
+        for bb in extractor.get_basic_blocks(f):
+            for feature, addr in extractor.extract_basic_block_features(f, bb):
+                if is_global_feature(feature):
+                    continue
+
+                if bb.address != addr:
+                    print(f" bb: {format_address(bb.address)}: {feature} -> {format_address(addr)}")
+                else:
+                    print(f" bb: {format_address(bb.address)}: {feature}")
+
+            for insn in extractor.get_instructions(f, bb):
+                for feature, addr in extractor.extract_insn_features(f, bb, insn):
+                    if is_global_feature(feature):
+                        continue
+
+                    try:
+                        if insn.address != addr:
+                            print(
+                                f"  insn: {format_address(f.address)}: {format_address(insn.address)}: {feature} -> {format_address(addr)}"
+                            )
+                        else:
+                            print(f"  insn: {format_address(insn.address)}: {feature}")
+
+                    except UnicodeEncodeError:
+                        # may be an issue while piping to less and encountering non-ascii characters
+                        continue
+
+
+def print_dynamic_features(processes, extractor: DynamicFeatureExtractor):
+    for p in processes:
+        print(f"proc: {extractor.get_process_name(p)} (ppid={p.address.ppid}, pid={p.address.pid})")
+
+        for feature, _ in extractor.extract_process_features(p):
+            if is_global_feature(feature):
+                continue
+
+            print(f" proc: {extractor.get_process_name(p)}: {feature}")
+
+        for t in extractor.get_threads(p):
+            print(f"  thread: {t.address.tid}")
+            for feature, addr in extractor.extract_thread_features(p, t):
+                if is_global_feature(feature):
+                    continue
+
+                if feature != Feature(0):
+                    print(f"   {format_address(addr)}: {feature}")
+
+            for call in extractor.get_calls(p, t):
+                apis = []
+                arguments = []
+                for feature, addr in extractor.extract_call_features(p, t, call):
+                    if is_global_feature(feature):
+                        continue
+
+                    if isinstance(feature, API):
+                        assert isinstance(addr, capa.features.address.DynamicCallAddress)
+                        apis.append((addr.id, str(feature.value)))
+
+                    if isinstance(feature, (Number, String)):
+                        arguments.append(str(feature.value))
+
+                for cid, api in apis:
+                    print(f"    call {cid}: {api}({', '.join(arguments)})")
 
 
 def ida_main():
@@ -184,59 +291,30 @@ def ida_main():
             print(f"{hex(function)} not a function")
             return -1
 
-    print_features(function_handles, extractor)
+    print_static_features(function_handles, extractor)
 
     return 0
 
 
-def print_features(functions, extractor: capa.features.extractors.base_extractor.FeatureExtractor):
-    for f in functions:
-        if extractor.is_library_function(f.address):
-            function_name = extractor.get_function_name(f.address)
-            logger.debug("skipping library function %s (%s)", format_address(f.address), function_name)
-            continue
+def ghidra_main():
+    import capa.features.extractors.ghidra.extractor
 
-        print(f"func: {format_address(f.address)}")
+    extractor = capa.features.extractors.ghidra.extractor.GhidraFeatureExtractor()
 
-        for feature, addr in extractor.extract_function_features(f):
-            if capa.features.common.is_global_feature(feature):
-                continue
+    for feature, addr in extractor.extract_file_features():
+        print(f"file: {format_address(addr)}: {feature}")
 
-            if f.address != addr:
-                print(f" func: {format_address(f.address)}: {feature} -> {format_address(addr)}")
-            else:
-                print(f" func: {format_address(f.address)}: {feature}")
+    function_handles = tuple(extractor.get_functions())
 
-        for bb in extractor.get_basic_blocks(f):
-            for feature, addr in extractor.extract_basic_block_features(f, bb):
-                if capa.features.common.is_global_feature(feature):
-                    continue
+    print_static_features(function_handles, extractor)
 
-                if bb.address != addr:
-                    print(f" bb: {format_address(bb.address)}: {feature} -> {format_address(addr)}")
-                else:
-                    print(f" bb: {format_address(bb.address)}: {feature}")
-
-            for insn in extractor.get_instructions(f, bb):
-                for feature, addr in extractor.extract_insn_features(f, bb, insn):
-                    if capa.features.common.is_global_feature(feature):
-                        continue
-
-                    try:
-                        if insn.address != addr:
-                            print(
-                                f"  insn: {format_address(f.address)}: {format_address(insn.address)}: {feature} -> {format_address(addr)}"
-                            )
-                        else:
-                            print(f"  insn: {format_address(insn.address)}: {feature}")
-
-                    except UnicodeEncodeError:
-                        # may be an issue while piping to less and encountering non-ascii characters
-                        continue
+    return 0
 
 
 if __name__ == "__main__":
-    if capa.main.is_runtime_ida():
+    if capa.helpers.is_runtime_ida():
         ida_main()
+    elif capa.helpers.is_runtime_ghidra():
+        ghidra_main()
     else:
         sys.exit(main())

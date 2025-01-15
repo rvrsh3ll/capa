@@ -1,13 +1,21 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
-from typing import Tuple, Iterator
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Iterator
 
 import PE.carve as pe_carve  # vivisect PE
+import vivisect
 import viv_utils
 import viv_utils.flirt
 
@@ -16,21 +24,46 @@ import capa.features.extractors.common
 import capa.features.extractors.helpers
 import capa.features.extractors.strings
 from capa.features.file import Export, Import, Section, FunctionName
-from capa.features.common import String, Feature, Characteristic
+from capa.features.common import Feature, Characteristic
 from capa.features.address import Address, FileOffsetAddress, AbsoluteVirtualAddress
 
 
-def extract_file_embedded_pe(buf, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_embedded_pe(buf, **kwargs) -> Iterator[tuple[Feature, Address]]:
     for offset, _ in pe_carve.carve(buf, 1):
         yield Characteristic("embedded pe"), FileOffsetAddress(offset)
 
 
-def extract_file_export_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def get_first_vw_filename(vw: vivisect.VivWorkspace):
+    # vivisect associates metadata with each file that its loaded into the workspace.
+    # capa only loads a single file into each workspace.
+    # so to access the metadata for the file in question, we can just take the first one.
+    # otherwise, we'd have to pass around the module name of the file we're analyzing,
+    # which is a pain.
+    #
+    # so this is a simplifying assumption.
+    return next(iter(vw.filemeta.keys()))
+
+
+def extract_file_export_names(vw: vivisect.VivWorkspace, **kwargs) -> Iterator[tuple[Feature, Address]]:
     for va, _, name, _ in vw.getExports():
         yield Export(name), AbsoluteVirtualAddress(va)
 
+    if vw.getMeta("Format") == "pe":
+        pe = vw.parsedbin
+        baseaddr = pe.IMAGE_NT_HEADERS.OptionalHeader.ImageBase
+        for rva, _, forwarded_name in vw.getFileMeta(get_first_vw_filename(vw), "forwarders"):
+            try:
+                forwarded_name = forwarded_name.partition(b"\x00")[0].decode("ascii")
+            except UnicodeDecodeError:
+                continue
 
-def extract_file_import_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+            forwarded_name = capa.features.extractors.helpers.reformat_forwarded_export_name(forwarded_name)
+            va = baseaddr + rva
+            yield Export(forwarded_name), AbsoluteVirtualAddress(va)
+            yield Characteristic("forwarded export"), AbsoluteVirtualAddress(va)
+
+
+def extract_file_import_names(vw, **kwargs) -> Iterator[tuple[Feature, Address]]:
     """
     extract imported function names
     1. imports by ordinal:
@@ -47,7 +80,7 @@ def extract_file_import_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address]]
             impname = "#" + impname[len("ord") :]
 
         addr = AbsoluteVirtualAddress(va)
-        for name in capa.features.extractors.helpers.generate_symbols(modname, impname):
+        for name in capa.features.extractors.helpers.generate_symbols(modname, impname, include_dll=True):
             yield Import(name), addr
 
 
@@ -65,16 +98,16 @@ def is_viv_ord_impname(impname: str) -> bool:
         return True
 
 
-def extract_file_section_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_section_names(vw, **kwargs) -> Iterator[tuple[Feature, Address]]:
     for va, _, segname, _ in vw.getSegments():
         yield Section(segname), AbsoluteVirtualAddress(va)
 
 
-def extract_file_strings(buf, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_strings(buf, **kwargs) -> Iterator[tuple[Feature, Address]]:
     yield from capa.features.extractors.common.extract_file_strings(buf)
 
 
-def extract_file_function_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_function_names(vw, **kwargs) -> Iterator[tuple[Feature, Address]]:
     """
     extract the names of statically-linked library functions.
     """
@@ -91,11 +124,11 @@ def extract_file_function_names(vw, **kwargs) -> Iterator[Tuple[Feature, Address
                 yield FunctionName(name[1:]), addr
 
 
-def extract_file_format(buf, **kwargs) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_format(buf, **kwargs) -> Iterator[tuple[Feature, Address]]:
     yield from capa.features.extractors.common.extract_format(buf)
 
 
-def extract_features(vw, buf: bytes) -> Iterator[Tuple[Feature, Address]]:
+def extract_features(vw, buf: bytes) -> Iterator[tuple[Feature, Address]]:
     """
     extract file features from given workspace
 
@@ -104,7 +137,7 @@ def extract_features(vw, buf: bytes) -> Iterator[Tuple[Feature, Address]]:
       buf: the raw input file bytes
 
     yields:
-      Tuple[Feature, Address]: a feature and its location.
+      tuple[Feature, Address]: a feature and its location.
     """
 
     for file_handler in FILE_HANDLERS:

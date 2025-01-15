@@ -1,10 +1,21 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2022 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import copy
+
+import pytest
+import fixtures
 
 import capa
 import capa.engine as ceng
@@ -227,3 +238,55 @@ def test_basic_block_node_from_capa():
     node = rdoc.node_from_capa(capa.features.basicblock.BasicBlock(""))
     assert isinstance(node, rdoc.FeatureNode)
     assert isinstance(node.feature, frzf.BasicBlockFeature)
+
+
+def assert_round_trip(rd: rdoc.ResultDocument):
+    one = rd
+
+    doc = one.model_dump_json(exclude_none=True)
+    two = rdoc.ResultDocument.model_validate_json(doc)
+
+    # show the round trip works
+    # first by comparing the objects directly,
+    # which works thanks to pydantic model equality.
+    assert one == two
+    # second by showing their json representations are the same.
+    assert one.model_dump_json(exclude_none=True) == two.model_dump_json(exclude_none=True)
+
+    # now show that two different versions are not equal.
+    three = copy.deepcopy(two)
+    three.meta.__dict__.update({"version": "0.0.0"})
+    assert one.meta.version != three.meta.version
+    assert one != three
+    assert one.model_dump_json(exclude_none=True) != three.model_dump_json(exclude_none=True)
+
+
+@pytest.mark.parametrize(
+    "rd_file",
+    [
+        pytest.param("a3f3bbc_rd"),
+        pytest.param("al_khaserx86_rd"),
+        pytest.param("al_khaserx64_rd"),
+        pytest.param("a076114_rd"),
+        pytest.param("pma0101_rd"),
+        pytest.param("dotnet_1c444e_rd"),
+    ],
+)
+def test_round_trip(request, rd_file):
+    rd: rdoc.ResultDocument = request.getfixturevalue(rd_file)
+    assert_round_trip(rd)
+
+
+def test_json_to_rdoc():
+    path = fixtures.get_data_path_by_name("pma01-01-rd")
+    assert isinstance(rdoc.ResultDocument.from_file(path), rdoc.ResultDocument)
+
+
+def test_rdoc_to_capa():
+    path = fixtures.get_data_path_by_name("pma01-01-rd")
+
+    rd = rdoc.ResultDocument.from_file(path)
+
+    meta, capabilites = rd.to_capa()
+    assert isinstance(meta, rdoc.Metadata)
+    assert isinstance(capabilites, dict)

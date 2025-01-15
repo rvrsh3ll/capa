@@ -1,5 +1,20 @@
+# Copyright 2022 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
-from typing import Tuple, Iterator, cast
+from typing import Iterator
+from pathlib import Path
 
 import dnfile
 import pefile
@@ -23,42 +38,45 @@ from capa.features.common import (
     Characteristic,
 )
 from capa.features.address import NO_ADDRESS, Address, DNTokenAddress
-from capa.features.extractors.base_extractor import FeatureExtractor
+from capa.features.extractors.dnfile.types import DnType
+from capa.features.extractors.base_extractor import SampleHashes, StaticFeatureExtractor
 from capa.features.extractors.dnfile.helpers import (
-    DnType,
     iter_dotnet_table,
     is_dotnet_mixed_mode,
     get_dotnet_managed_imports,
     get_dotnet_managed_methods,
+    resolve_nested_typedef_name,
+    resolve_nested_typeref_name,
     calculate_dotnet_token_value,
     get_dotnet_unmanaged_imports,
+    get_dotnet_nested_class_table_index,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def extract_file_format(**kwargs) -> Iterator[Tuple[Format, Address]]:
-    yield Format(FORMAT_PE), NO_ADDRESS
+def extract_file_format(**kwargs) -> Iterator[tuple[Format, Address]]:
     yield Format(FORMAT_DOTNET), NO_ADDRESS
+    yield Format(FORMAT_PE), NO_ADDRESS
 
 
-def extract_file_import_names(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[Import, Address]]:
+def extract_file_import_names(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[Import, Address]]:
     for method in get_dotnet_managed_imports(pe):
         # like System.IO.File::OpenRead
         yield Import(str(method)), DNTokenAddress(method.token)
 
     for imp in get_dotnet_unmanaged_imports(pe):
         # like kernel32.CreateFileA
-        for name in capa.features.extractors.helpers.generate_symbols(imp.module, imp.method):
+        for name in capa.features.extractors.helpers.generate_symbols(imp.module, imp.method, include_dll=True):
             yield Import(name), DNTokenAddress(imp.token)
 
 
-def extract_file_function_names(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[FunctionName, Address]]:
+def extract_file_function_names(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[FunctionName, Address]]:
     for method in get_dotnet_managed_methods(pe):
         yield FunctionName(str(method)), DNTokenAddress(method.token)
 
 
-def extract_file_namespace_features(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[Namespace, Address]]:
+def extract_file_namespace_features(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[Namespace, Address]]:
     """emit namespace features from TypeRef and TypeDef tables"""
 
     # namespaces may be referenced multiple times, so we need to filter
@@ -67,12 +85,12 @@ def extract_file_namespace_features(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple
     for _, typedef in iter_dotnet_table(pe, dnfile.mdtable.TypeDef.number):
         # emit internal .NET namespaces
         assert isinstance(typedef, dnfile.mdtable.TypeDefRow)
-        namespaces.add(typedef.TypeNamespace)
+        namespaces.add(str(typedef.TypeNamespace))
 
     for _, typeref in iter_dotnet_table(pe, dnfile.mdtable.TypeRef.number):
         # emit external .NET namespaces
         assert isinstance(typeref, dnfile.mdtable.TypeRefRow)
-        namespaces.add(typeref.TypeNamespace)
+        namespaces.add(str(typeref.TypeNamespace))
 
     # namespaces may be empty, discard
     namespaces.discard("")
@@ -82,28 +100,34 @@ def extract_file_namespace_features(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple
         yield Namespace(namespace), NO_ADDRESS
 
 
-def extract_file_class_features(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[Class, Address]]:
+def extract_file_class_features(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[Class, Address]]:
     """emit class features from TypeRef and TypeDef tables"""
+    nested_class_table = get_dotnet_nested_class_table_index(pe)
+
     for rid, typedef in iter_dotnet_table(pe, dnfile.mdtable.TypeDef.number):
         # emit internal .NET classes
         assert isinstance(typedef, dnfile.mdtable.TypeDefRow)
 
+        typedefnamespace, typedefname = resolve_nested_typedef_name(nested_class_table, rid, typedef, pe)
+
         token = calculate_dotnet_token_value(dnfile.mdtable.TypeDef.number, rid)
-        yield Class(DnType.format_name(typedef.TypeName, namespace=typedef.TypeNamespace)), DNTokenAddress(token)
+        yield Class(DnType.format_name(typedefname, namespace=typedefnamespace)), DNTokenAddress(token)
 
     for rid, typeref in iter_dotnet_table(pe, dnfile.mdtable.TypeRef.number):
         # emit external .NET classes
         assert isinstance(typeref, dnfile.mdtable.TypeRefRow)
 
+        typerefnamespace, typerefname = resolve_nested_typeref_name(typeref.ResolutionScope.row_index, typeref, pe)
+
         token = calculate_dotnet_token_value(dnfile.mdtable.TypeRef.number, rid)
-        yield Class(DnType.format_name(typeref.TypeName, namespace=typeref.TypeNamespace)), DNTokenAddress(token)
+        yield Class(DnType.format_name(typerefname, namespace=typerefnamespace)), DNTokenAddress(token)
 
 
-def extract_file_os(**kwargs) -> Iterator[Tuple[OS, Address]]:
+def extract_file_os(**kwargs) -> Iterator[tuple[OS, Address]]:
     yield OS(OS_ANY), NO_ADDRESS
 
 
-def extract_file_arch(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[Arch, Address]]:
+def extract_file_arch(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[Arch, Address]]:
     # to distinguish in more detail, see https://stackoverflow.com/a/23614024/10548020
     # .NET 4.5 added option: any CPU, 32-bit preferred
     assert pe.net is not None
@@ -117,18 +141,18 @@ def extract_file_arch(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[Arch, Address
         yield Arch(ARCH_ANY), NO_ADDRESS
 
 
-def extract_file_strings(pe: dnfile.dnPE, **kwargs) -> Iterator[Tuple[String, Address]]:
+def extract_file_strings(pe: dnfile.dnPE, **kwargs) -> Iterator[tuple[String, Address]]:
     yield from capa.features.extractors.common.extract_file_strings(pe.__data__)
 
 
 def extract_file_mixed_mode_characteristic_features(
     pe: dnfile.dnPE, **kwargs
-) -> Iterator[Tuple[Characteristic, Address]]:
+) -> Iterator[tuple[Characteristic, Address]]:
     if is_dotnet_mixed_mode(pe):
         yield Characteristic("mixed mode"), NO_ADDRESS
 
 
-def extract_file_features(pe: dnfile.dnPE) -> Iterator[Tuple[Feature, Address]]:
+def extract_file_features(pe: dnfile.dnPE) -> Iterator[tuple[Feature, Address]]:
     for file_handler in FILE_HANDLERS:
         for feature, addr in file_handler(pe=pe):  # type: ignore
             yield feature, addr
@@ -145,7 +169,7 @@ FILE_HANDLERS = (
 )
 
 
-def extract_global_features(pe: dnfile.dnPE) -> Iterator[Tuple[Feature, Address]]:
+def extract_global_features(pe: dnfile.dnPE) -> Iterator[tuple[Feature, Address]]:
     for handler in GLOBAL_HANDLERS:
         for feature, va in handler(pe=pe):  # type: ignore
             yield feature, va
@@ -157,11 +181,11 @@ GLOBAL_HANDLERS = (
 )
 
 
-class DotnetFileFeatureExtractor(FeatureExtractor):
-    def __init__(self, path: str):
-        super().__init__()
-        self.path: str = path
-        self.pe: dnfile.dnPE = dnfile.dnPE(path)
+class DotnetFileFeatureExtractor(StaticFeatureExtractor):
+    def __init__(self, path: Path):
+        super().__init__(hashes=SampleHashes.from_bytes(path.read_bytes()))
+        self.path: Path = path
+        self.pe: dnfile.dnPE = dnfile.dnPE(str(path))
 
     def get_base_address(self):
         return NO_ADDRESS
@@ -187,7 +211,7 @@ class DotnetFileFeatureExtractor(FeatureExtractor):
     def is_mixed_mode(self) -> bool:
         return is_dotnet_mixed_mode(self.pe)
 
-    def get_runtime_version(self) -> Tuple[int, int]:
+    def get_runtime_version(self) -> tuple[int, int]:
         assert self.pe.net is not None
         assert self.pe.net.struct is not None
         assert self.pe.net.struct.MajorRuntimeVersion is not None

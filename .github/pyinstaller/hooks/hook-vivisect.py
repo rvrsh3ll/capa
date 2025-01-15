@@ -1,4 +1,16 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from PyInstaller.utils.hooks import copy_metadata
 
@@ -24,7 +36,7 @@ excludedimports = [
     "pyqtwebengine",
     # the above are imported by these viv modules.
     # so really, we'd want to exclude these submodules of viv.
-    # but i dont think this works.
+    # but i don't think this works.
     "vqt",
     "vdb.qt",
     "envi.qt",
@@ -38,10 +50,8 @@ hiddenimports = [
     "vivisect",
     "vivisect.analysis",
     "vivisect.analysis.amd64",
-    "vivisect.analysis.amd64",
     "vivisect.analysis.amd64.emulation",
     "vivisect.analysis.amd64.golang",
-    "vivisect.analysis.crypto",
     "vivisect.analysis.crypto",
     "vivisect.analysis.crypto.constants",
     "vivisect.analysis.elf",
@@ -49,28 +59,27 @@ hiddenimports = [
     "vivisect.analysis.elf.elfplt_late",
     "vivisect.analysis.elf.libc_start_main",
     "vivisect.analysis.generic",
-    "vivisect.analysis.generic",
     "vivisect.analysis.generic.codeblocks",
     "vivisect.analysis.generic.emucode",
     "vivisect.analysis.generic.entrypoints",
     "vivisect.analysis.generic.funcentries",
     "vivisect.analysis.generic.impapi",
+    "vivisect.analysis.generic.linker",
     "vivisect.analysis.generic.mkpointers",
+    "vivisect.analysis.generic.noret",
     "vivisect.analysis.generic.pointers",
     "vivisect.analysis.generic.pointertables",
     "vivisect.analysis.generic.relocations",
     "vivisect.analysis.generic.strconst",
     "vivisect.analysis.generic.switchcase",
+    "vivisect.analysis.generic.symswitchcase",
     "vivisect.analysis.generic.thunks",
-    "vivisect.analysis.generic.noret",
-    "vivisect.analysis.i386",
     "vivisect.analysis.i386",
     "vivisect.analysis.i386.calling",
     "vivisect.analysis.i386.golang",
     "vivisect.analysis.i386.importcalls",
     "vivisect.analysis.i386.instrhook",
-    "vivisect.analysis.i386.thunk_bx",
-    "vivisect.analysis.ms",
+    "vivisect.analysis.i386.thunk_reg",
     "vivisect.analysis.ms",
     "vivisect.analysis.ms.hotpatch",
     "vivisect.analysis.ms.localhints",
@@ -81,8 +90,40 @@ hiddenimports = [
     "vivisect.impapi.posix.amd64",
     "vivisect.impapi.posix.i386",
     "vivisect.impapi.windows",
+    "vivisect.impapi.windows.advapi_32",
+    "vivisect.impapi.windows.advapi_64",
     "vivisect.impapi.windows.amd64",
+    "vivisect.impapi.windows.gdi_32",
+    "vivisect.impapi.windows.gdi_64",
     "vivisect.impapi.windows.i386",
+    "vivisect.impapi.windows.kernel_32",
+    "vivisect.impapi.windows.kernel_64",
+    "vivisect.impapi.windows.msvcr100_32",
+    "vivisect.impapi.windows.msvcr100_64",
+    "vivisect.impapi.windows.msvcr110_32",
+    "vivisect.impapi.windows.msvcr110_64",
+    "vivisect.impapi.windows.msvcr120_32",
+    "vivisect.impapi.windows.msvcr120_64",
+    "vivisect.impapi.windows.msvcr71_32",
+    "vivisect.impapi.windows.msvcr80_32",
+    "vivisect.impapi.windows.msvcr80_64",
+    "vivisect.impapi.windows.msvcr90_32",
+    "vivisect.impapi.windows.msvcr90_64",
+    "vivisect.impapi.windows.msvcrt_32",
+    "vivisect.impapi.windows.msvcrt_64",
+    "vivisect.impapi.windows.ntdll_32",
+    "vivisect.impapi.windows.ntdll_64",
+    "vivisect.impapi.windows.ole_32",
+    "vivisect.impapi.windows.ole_64",
+    "vivisect.impapi.windows.rpcrt4_32",
+    "vivisect.impapi.windows.rpcrt4_64",
+    "vivisect.impapi.windows.shell_32",
+    "vivisect.impapi.windows.shell_64",
+    "vivisect.impapi.windows.user_32",
+    "vivisect.impapi.windows.user_64",
+    "vivisect.impapi.windows.ws2plus_32",
+    "vivisect.impapi.windows.ws2plus_64",
+    "vivisect.impapi.winkern",
     "vivisect.impapi.winkern.i386",
     "vivisect.impapi.winkern.amd64",
     "vivisect.parsers.blob",

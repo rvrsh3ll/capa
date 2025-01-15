@@ -1,62 +1,84 @@
 #!/usr/bin/env python3
-"""
-Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
-You may obtain a copy of the License at: [package root]/LICENSE.txt
-Unless required by applicable law or agreed to in writing, software distributed under the License
- is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and limitations under the License.
-"""
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
 import os
 import sys
 import time
-import hashlib
 import logging
-import os.path
 import argparse
-import datetime
 import textwrap
-import itertools
 import contextlib
-import collections
-from typing import Any, Dict, List, Tuple, Callable
+from types import TracebackType
+from typing import Any, Optional, TypedDict
+from pathlib import Path
 
-import halo
-import tqdm
 import colorama
 from pefile import PEFormatError
+from rich.logging import RichHandler
 from elftools.common.exceptions import ELFError
 
 import capa.perf
 import capa.rules
 import capa.engine
+import capa.loader
+import capa.helpers
 import capa.version
 import capa.render.json
 import capa.rules.cache
 import capa.render.default
 import capa.render.verbose
 import capa.features.common
-import capa.features.freeze
 import capa.render.vverbose
 import capa.features.extractors
+import capa.render.result_document
+import capa.render.result_document as rdoc
 import capa.features.extractors.common
-import capa.features.extractors.pefile
-import capa.features.extractors.dnfile_
-import capa.features.extractors.elffile
-import capa.features.extractors.dotnetfile
-import capa.features.extractors.base_extractor
-from capa.rules import Rule, Scope, RuleSet
-from capa.engine import FeatureSet, MatchResults
+from capa.rules import RuleSet
+from capa.engine import MatchResults
+from capa.loader import (
+    BACKEND_IDA,
+    BACKEND_VIV,
+    BACKEND_CAPE,
+    BACKEND_BINJA,
+    BACKEND_VMRAY,
+    BACKEND_DOTNET,
+    BACKEND_FREEZE,
+    BACKEND_PEFILE,
+    BACKEND_DRAKVUF,
+    BACKEND_BINEXPORT2,
+)
 from capa.helpers import (
-    get_format,
     get_file_taste,
     get_auto_format,
     log_unsupported_os_error,
     log_unsupported_arch_error,
     log_unsupported_format_error,
+    log_empty_sandbox_report_error,
+    log_unsupported_cape_report_error,
+    log_unsupported_vmray_report_error,
+    log_unsupported_drakvuf_report_error,
 )
-from capa.exceptions import UnsupportedOSError, UnsupportedArchError, UnsupportedFormatError, UnsupportedRuntimeError
+from capa.exceptions import (
+    InvalidArgument,
+    EmptyReportError,
+    UnsupportedOSError,
+    UnsupportedArchError,
+    UnsupportedFormatError,
+    UnsupportedRuntimeError,
+)
 from capa.features.common import (
     OS_AUTO,
     OS_LINUX,
@@ -65,18 +87,31 @@ from capa.features.common import (
     FORMAT_ELF,
     OS_WINDOWS,
     FORMAT_AUTO,
+    FORMAT_CAPE,
     FORMAT_SC32,
     FORMAT_SC64,
+    FORMAT_VMRAY,
     FORMAT_DOTNET,
     FORMAT_FREEZE,
+    FORMAT_RESULT,
+    FORMAT_DRAKVUF,
+    STATIC_FORMATS,
+    DYNAMIC_FORMATS,
+    FORMAT_BINJA_DB,
+    FORMAT_BINEXPORT2,
 )
-from capa.features.address import NO_ADDRESS, Address
-from capa.features.extractors.base_extractor import BBHandle, InsnHandle, FunctionHandle, FeatureExtractor
+from capa.capabilities.common import find_capabilities, has_file_limitation, find_file_capabilities
+from capa.features.extractors.base_extractor import (
+    ProcessFilter,
+    FunctionFilter,
+    FeatureExtractor,
+    StaticFeatureExtractor,
+    DynamicFeatureExtractor,
+)
 
 RULES_PATH_DEFAULT_STRING = "(embedded rules)"
 SIGNATURES_PATH_DEFAULT_STRING = "(embedded signatures)"
-BACKEND_VIV = "vivisect"
-BACKEND_DOTNET = "dotnet"
+BACKEND_AUTO = "auto"
 
 E_MISSING_RULES = 10
 E_MISSING_FILE = 11
@@ -88,8 +123,20 @@ E_INVALID_FILE_TYPE = 16
 E_INVALID_FILE_ARCH = 17
 E_INVALID_FILE_OS = 18
 E_UNSUPPORTED_IDA_VERSION = 19
+E_UNSUPPORTED_GHIDRA_VERSION = 20
+E_MISSING_CAPE_STATIC_ANALYSIS = 21
+E_MISSING_CAPE_DYNAMIC_ANALYSIS = 22
+E_EMPTY_REPORT = 23
+E_UNSUPPORTED_GHIDRA_EXECUTION_MODE = 24
+E_INVALID_INPUT_FORMAT = 25
+E_INVALID_FEATURE_EXTRACTOR = 26
 
 logger = logging.getLogger("capa")
+
+
+class FilterConfig(TypedDict, total=False):
+    processes: set[int]
+    functions: set[int]
 
 
 @contextlib.contextmanager
@@ -110,697 +157,71 @@ def set_vivisect_log_level(level):
     logging.getLogger("Elf").setLevel(level)
 
 
-def find_instruction_capabilities(
-    ruleset: RuleSet, extractor: FeatureExtractor, f: FunctionHandle, bb: BBHandle, insn: InsnHandle
-) -> Tuple[FeatureSet, MatchResults]:
-    """
-    find matches for the given rules for the given instruction.
-
-    returns: tuple containing (features for instruction, match results for instruction)
-    """
-    # all features found for the instruction.
-    features = collections.defaultdict(set)  # type: FeatureSet
-
-    for feature, addr in itertools.chain(
-        extractor.extract_insn_features(f, bb, insn), extractor.extract_global_features()
-    ):
-        features[feature].add(addr)
-
-    # matches found at this instruction.
-    _, matches = ruleset.match(Scope.INSTRUCTION, features, insn.address)
-
-    for rule_name, res in matches.items():
-        rule = ruleset[rule_name]
-        for addr, _ in res:
-            capa.engine.index_rule_matches(features, rule, [addr])
-
-    return features, matches
-
-
-def find_basic_block_capabilities(
-    ruleset: RuleSet, extractor: FeatureExtractor, f: FunctionHandle, bb: BBHandle
-) -> Tuple[FeatureSet, MatchResults, MatchResults]:
-    """
-    find matches for the given rules within the given basic block.
-
-    returns: tuple containing (features for basic block, match results for basic block, match results for instructions)
-    """
-    # all features found within this basic block,
-    # includes features found within instructions.
-    features = collections.defaultdict(set)  # type: FeatureSet
-
-    # matches found at the instruction scope.
-    # might be found at different instructions, thats ok.
-    insn_matches = collections.defaultdict(list)  # type: MatchResults
-
-    for insn in extractor.get_instructions(f, bb):
-        ifeatures, imatches = find_instruction_capabilities(ruleset, extractor, f, bb, insn)
-        for feature, vas in ifeatures.items():
-            features[feature].update(vas)
-
-        for rule_name, res in imatches.items():
-            insn_matches[rule_name].extend(res)
-
-    for feature, va in itertools.chain(
-        extractor.extract_basic_block_features(f, bb), extractor.extract_global_features()
-    ):
-        features[feature].add(va)
-
-    # matches found within this basic block.
-    _, matches = ruleset.match(Scope.BASIC_BLOCK, features, bb.address)
-
-    for rule_name, res in matches.items():
-        rule = ruleset[rule_name]
-        for va, _ in res:
-            capa.engine.index_rule_matches(features, rule, [va])
-
-    return features, matches, insn_matches
-
-
-def find_code_capabilities(
-    ruleset: RuleSet, extractor: FeatureExtractor, fh: FunctionHandle
-) -> Tuple[MatchResults, MatchResults, MatchResults, int]:
-    """
-    find matches for the given rules within the given function.
-
-    returns: tuple containing (match results for function, match results for basic blocks, match results for instructions, number of features)
-    """
-    # all features found within this function,
-    # includes features found within basic blocks (and instructions).
-    function_features = collections.defaultdict(set)  # type: FeatureSet
-
-    # matches found at the basic block scope.
-    # might be found at different basic blocks, thats ok.
-    bb_matches = collections.defaultdict(list)  # type: MatchResults
-
-    # matches found at the instruction scope.
-    # might be found at different instructions, thats ok.
-    insn_matches = collections.defaultdict(list)  # type: MatchResults
-
-    for bb in extractor.get_basic_blocks(fh):
-        features, bmatches, imatches = find_basic_block_capabilities(ruleset, extractor, fh, bb)
-        for feature, vas in features.items():
-            function_features[feature].update(vas)
-
-        for rule_name, res in bmatches.items():
-            bb_matches[rule_name].extend(res)
-
-        for rule_name, res in imatches.items():
-            insn_matches[rule_name].extend(res)
-
-    for feature, va in itertools.chain(extractor.extract_function_features(fh), extractor.extract_global_features()):
-        function_features[feature].add(va)
-
-    _, function_matches = ruleset.match(Scope.FUNCTION, function_features, fh.address)
-    return function_matches, bb_matches, insn_matches, len(function_features)
-
-
-def find_file_capabilities(ruleset: RuleSet, extractor: FeatureExtractor, function_features: FeatureSet):
-    file_features = collections.defaultdict(set)  # type: FeatureSet
-
-    for feature, va in itertools.chain(extractor.extract_file_features(), extractor.extract_global_features()):
-        # not all file features may have virtual addresses.
-        # if not, then at least ensure the feature shows up in the index.
-        # the set of addresses will still be empty.
-        if va:
-            file_features[feature].add(va)
-        else:
-            if feature not in file_features:
-                file_features[feature] = set()
-
-    logger.debug("analyzed file and extracted %d features", len(file_features))
-
-    file_features.update(function_features)
-
-    _, matches = ruleset.match(Scope.FILE, file_features, NO_ADDRESS)
-    return matches, len(file_features)
-
-
-def find_capabilities(ruleset: RuleSet, extractor: FeatureExtractor, disable_progress=None) -> Tuple[MatchResults, Any]:
-    all_function_matches = collections.defaultdict(list)  # type: MatchResults
-    all_bb_matches = collections.defaultdict(list)  # type: MatchResults
-    all_insn_matches = collections.defaultdict(list)  # type: MatchResults
-
-    meta = {
-        "feature_counts": {
-            "file": 0,
-            "functions": {},
-        },
-        "library_functions": {},
-    }  # type: Dict[str, Any]
-
-    pbar = tqdm.tqdm
-    if disable_progress:
-        # do not use tqdm to avoid unnecessary side effects when caller intends
-        # to disable progress completely
-        pbar = lambda s, *args, **kwargs: s
-
-    functions = list(extractor.get_functions())
-    n_funcs = len(functions)
-
-    pb = pbar(functions, desc="matching", unit=" functions", postfix="skipped 0 library functions")
-    for f in pb:
-        if extractor.is_library_function(f.address):
-            function_name = extractor.get_function_name(f.address)
-            logger.debug("skipping library function 0x%x (%s)", f.address, function_name)
-            meta["library_functions"][f.address] = function_name
-            n_libs = len(meta["library_functions"])
-            percentage = round(100 * (n_libs / n_funcs))
-            if isinstance(pb, tqdm.tqdm):
-                pb.set_postfix_str(f"skipped {n_libs} library functions ({percentage}%)")
-            continue
-
-        function_matches, bb_matches, insn_matches, feature_count = find_code_capabilities(ruleset, extractor, f)
-        meta["feature_counts"]["functions"][f.address] = feature_count
-        logger.debug("analyzed function 0x%x and extracted %d features", f.address, feature_count)
-
-        for rule_name, res in function_matches.items():
-            all_function_matches[rule_name].extend(res)
-        for rule_name, res in bb_matches.items():
-            all_bb_matches[rule_name].extend(res)
-        for rule_name, res in insn_matches.items():
-            all_insn_matches[rule_name].extend(res)
-
-    # collection of features that captures the rule matches within function, BB, and instruction scopes.
-    # mapping from feature (matched rule) to set of addresses at which it matched.
-    function_and_lower_features: FeatureSet = collections.defaultdict(set)
-    for rule_name, results in itertools.chain(
-        all_function_matches.items(), all_bb_matches.items(), all_insn_matches.items()
-    ):
-        locations = set(map(lambda p: p[0], results))
-        rule = ruleset[rule_name]
-        capa.engine.index_rule_matches(function_and_lower_features, rule, locations)
-
-    all_file_matches, feature_count = find_file_capabilities(ruleset, extractor, function_and_lower_features)
-    meta["feature_counts"]["file"] = feature_count
-
-    matches = {
-        rule_name: results
-        for rule_name, results in itertools.chain(
-            # each rule exists in exactly one scope,
-            # so there won't be any overlap among these following MatchResults,
-            # and we can merge the dictionaries naively.
-            all_insn_matches.items(),
-            all_bb_matches.items(),
-            all_function_matches.items(),
-            all_file_matches.items(),
-        )
-    }
-
-    return matches, meta
-
-
-# TODO move all to helpers?
-def has_rule_with_namespace(rules, capabilities, rule_cat):
-    for rule_name in capabilities.keys():
-        if rules.rules[rule_name].meta.get("namespace", "").startswith(rule_cat):
-            return True
-    return False
-
-
-def is_internal_rule(rule: Rule) -> bool:
-    return rule.meta.get("namespace", "").startswith("internal/")
-
-
-def is_file_limitation_rule(rule: Rule) -> bool:
-    return rule.meta.get("namespace", "") == "internal/limitation/file"
-
-
-def has_file_limitation(rules: RuleSet, capabilities: MatchResults, is_standalone=True) -> bool:
-    file_limitation_rules = list(filter(is_file_limitation_rule, rules.rules.values()))
-
-    for file_limitation_rule in file_limitation_rules:
-        if file_limitation_rule.name not in capabilities:
-            continue
-
-        logger.warning("-" * 80)
-        for line in file_limitation_rule.meta.get("description", "").split("\n"):
-            logger.warning(" %s", line)
-        logger.warning(" Identified via rule: %s", file_limitation_rule.name)
-        if is_standalone:
-            logger.warning(" ")
-            logger.warning(" Use -v or -vv if you really want to see the capabilities identified by capa.")
-        logger.warning("-" * 80)
-
-        # bail on first file limitation
-        return True
-
-    return False
-
-
-def is_supported_format(sample: str) -> bool:
-    """
-    Return if this is a supported file based on magic header values
-    """
-    with open(sample, "rb") as f:
-        taste = f.read(0x100)
-
-    return len(list(capa.features.extractors.common.extract_format(taste))) == 1
-
-
-def is_supported_arch(sample: str) -> bool:
-    with open(sample, "rb") as f:
-        buf = f.read()
-
-    return len(list(capa.features.extractors.common.extract_arch(buf))) == 1
-
-
-def get_arch(sample: str) -> str:
-    with open(sample, "rb") as f:
-        buf = f.read()
-
-    for feature, _ in capa.features.extractors.common.extract_arch(buf):
-        assert isinstance(feature.value, str)
-        return feature.value
-
-    return "unknown"
-
-
-def is_supported_os(sample: str) -> bool:
-    with open(sample, "rb") as f:
-        buf = f.read()
-
-    return len(list(capa.features.extractors.common.extract_os(buf))) == 1
-
-
-def get_os(sample: str) -> str:
-    with open(sample, "rb") as f:
-        buf = f.read()
-
-    for feature, _ in capa.features.extractors.common.extract_os(buf):
-        assert isinstance(feature.value, str)
-        return feature.value
-
-    return "unknown"
-
-
-def get_meta_str(vw):
-    """
-    Return workspace meta information string
-    """
-    meta = []
-    for k in ["Format", "Platform", "Architecture"]:
-        if k in vw.metadata:
-            meta.append(f"{k.lower()}: {vw.metadata[k]}")
-    return f"{', '.join(meta)}, number of functions: {len(vw.getFunctions())}"
-
-
-def is_running_standalone() -> bool:
-    """
-    are we running from a PyInstaller'd executable?
-    if so, then we'll be able to access `sys._MEIPASS` for the packaged resources.
-    """
-    return hasattr(sys, "frozen") and hasattr(sys, "_MEIPASS")
-
-
-def get_default_root() -> str:
+def get_default_root() -> Path:
     """
     get the file system path to the default resources directory.
     under PyInstaller, this comes from _MEIPASS.
     under source, this is the root directory of the project.
     """
-    if is_running_standalone():
+    # we only expect capa.main to be packaged within PyInstaller,
+    # so we don't put this in a more common place, like capa.helpers.
+
+    if capa.helpers.is_running_standalone():
         # pylance/mypy don't like `sys._MEIPASS` because this isn't standard.
         # its injected by pyinstaller.
         # so we'll fetch this attribute dynamically.
-        return getattr(sys, "_MEIPASS")
+        assert hasattr(sys, "_MEIPASS")
+        return Path(sys._MEIPASS)
     else:
-        return os.path.join(os.path.dirname(__file__), "..")
+        return Path(__file__).resolve().parent.parent
 
 
-def get_default_signatures() -> List[str]:
+def get_default_signatures() -> list[Path]:
     """
     compute a list of file system paths to the default FLIRT signatures.
     """
-    sigs_path = os.path.join(get_default_root(), "sigs")
+    sigs_path = get_default_root() / "sigs"
     logger.debug("signatures path: %s", sigs_path)
 
     ret = []
-    for root, _, files in os.walk(sigs_path):
-        for file in files:
-            if not (file.endswith(".pat") or file.endswith(".pat.gz") or file.endswith(".sig")):
-                continue
-
-            ret.append(os.path.join(root, file))
+    for file in sigs_path.rglob("*"):
+        if file.is_file() and file.suffix.lower() in (".pat", ".pat.gz", ".sig"):
+            ret.append(file)
 
     return ret
 
 
-def get_workspace(path, format_, sigpaths):
-    """
-    load the program at the given path into a vivisect workspace using the given format.
-    also apply the given FLIRT signatures.
-
-    supported formats:
-      - pe
-      - elf
-      - shellcode 32-bit
-      - shellcode 64-bit
-      - auto
-
-    this creates and analyzes the workspace; however, it does *not* save the workspace.
-    this is the responsibility of the caller.
-    """
-
-    # lazy import enables us to not require viv if user wants SMDA, for example.
-    import viv_utils
-    import viv_utils.flirt
-
-    logger.debug("generating vivisect workspace for: %s", path)
-    # TODO should not be auto at this point, anymore
-    if format_ == FORMAT_AUTO:
-        if not is_supported_format(path):
-            raise UnsupportedFormatError()
-
-        # don't analyze, so that we can add our Flirt function analyzer first.
-        vw = viv_utils.getWorkspace(path, analyze=False, should_save=False)
-    elif format_ in {FORMAT_PE, FORMAT_ELF}:
-        vw = viv_utils.getWorkspace(path, analyze=False, should_save=False)
-    elif format_ == FORMAT_SC32:
-        # these are not analyzed nor saved.
-        vw = viv_utils.getShellcodeWorkspaceFromFile(path, arch="i386", analyze=False)
-    elif format_ == FORMAT_SC64:
-        vw = viv_utils.getShellcodeWorkspaceFromFile(path, arch="amd64", analyze=False)
-    else:
-        raise ValueError("unexpected format: " + format_)
-
-    viv_utils.flirt.register_flirt_signature_analyzers(vw, sigpaths)
-
-    vw.analyze()
-
-    logger.debug("%s", get_meta_str(vw))
-    return vw
-
-
-# TODO get_extractors -> List[FeatureExtractor]?
-def get_extractor(
-    path: str,
-    format_: str,
-    os: str,
-    backend: str,
-    sigpaths: List[str],
-    should_save_workspace=False,
-    disable_progress=False,
-) -> FeatureExtractor:
-    """
-    raises:
-      UnsupportedFormatError
-      UnsupportedArchError
-      UnsupportedOSError
-    """
-    if format_ not in (FORMAT_SC32, FORMAT_SC64):
-        if not is_supported_format(path):
-            raise UnsupportedFormatError()
-
-        if not is_supported_arch(path):
-            raise UnsupportedArchError()
-
-        if os == OS_AUTO and not is_supported_os(path):
-            raise UnsupportedOSError()
-
-    if format_ == FORMAT_DOTNET:
-        import capa.features.extractors.dnfile.extractor
-
-        return capa.features.extractors.dnfile.extractor.DnfileFeatureExtractor(path)
-
-    # default to use vivisect backend
-    else:
-        import capa.features.extractors.viv.extractor
-
-        with halo.Halo(text="analyzing program", spinner="simpleDots", stream=sys.stderr, enabled=not disable_progress):
-            vw = get_workspace(path, format_, sigpaths)
-
-            if should_save_workspace:
-                logger.debug("saving workspace")
-                try:
-                    vw.saveWorkspace()
-                except IOError:
-                    # see #168 for discussion around how to handle non-writable directories
-                    logger.info("source directory is not writable, won't save intermediate workspace")
-            else:
-                logger.debug("CAPA_SAVE_WORKSPACE unset, not saving workspace")
-
-        return capa.features.extractors.viv.extractor.VivisectFeatureExtractor(vw, path, os)
-
-
-def get_file_extractors(sample: str, format_: str) -> List[FeatureExtractor]:
-    file_extractors: List[FeatureExtractor] = list()
-
-    if format_ == FORMAT_PE:
-        file_extractors.append(capa.features.extractors.pefile.PefileFeatureExtractor(sample))
-
-    elif format_ == FORMAT_DOTNET:
-        file_extractors.append(capa.features.extractors.pefile.PefileFeatureExtractor(sample))
-        file_extractors.append(capa.features.extractors.dnfile_.DnfileFeatureExtractor(sample))
-
-    elif format_ == capa.features.extractors.common.FORMAT_ELF:
-        file_extractors.append(capa.features.extractors.elffile.ElfFeatureExtractor(sample))
-
-    return file_extractors
-
-
-def is_nursery_rule_path(path: str) -> bool:
-    """
-    The nursery is a spot for rules that have not yet been fully polished.
-    For example, they may not have references to public example of a technique.
-    Yet, we still want to capture and report on their matches.
-    The nursery is currently a subdirectory of the rules directory with that name.
-
-    When nursery rules are loaded, their metadata section should be updated with:
-      `nursery=True`.
-    """
-    return "nursery" in path
-
-
-def collect_rule_file_paths(rule_paths: List[str]) -> List[str]:
-    """
-    collect all rule file paths, including those in subdirectories.
-    """
-    rule_file_paths = []
-    for rule_path in rule_paths:
-        if not os.path.exists(rule_path):
-            raise IOError(f"rule path {rule_path} does not exist or cannot be accessed")
-
-        if os.path.isfile(rule_path):
-            rule_file_paths.append(rule_path)
-        elif os.path.isdir(rule_path):
-            logger.debug("reading rules from directory %s", rule_path)
-            for root, _, files in os.walk(rule_path):
-                if ".git" in root:
-                    # the .github directory contains CI config in capa-rules
-                    # this includes some .yml files
-                    # these are not rules
-                    # additionally, .git has files that are not .yml and generate the warning
-                    # skip those too
-                    continue
-                for file in files:
-                    if not file.endswith(".yml"):
-                        if not (file.startswith(".git") or file.endswith((".git", ".md", ".txt"))):
-                            # expect to see .git* files, readme.md, format.md, and maybe a .git directory
-                            # other things maybe are rules, but are mis-named.
-                            logger.warning("skipping non-.yml file: %s", file)
-                        continue
-                    rule_path = os.path.join(root, file)
-                    rule_file_paths.append(rule_path)
-
-    return rule_file_paths
-
-
-# TypeAlias. note: using `foo: TypeAlias = bar` is Python 3.10+
-RulePath = str
-
-
-def on_load_rule_default(_path: RulePath, i: int, _total: int) -> None:
-    return
-
-
-def get_rules(
-    rule_paths: List[RulePath],
-    cache_dir=None,
-    on_load_rule: Callable[[RulePath, int, int], None] = on_load_rule_default,
-) -> RuleSet:
-    """
-    args:
-      rule_paths: list of paths to rules files or directories containing rules files
-      cache_dir: directory to use for caching rules, or will use the default detected cache directory if None
-      on_load_rule: callback to invoke before a rule is loaded, use for progress or cancellation
-    """
-    if cache_dir is None:
-        cache_dir = capa.rules.cache.get_default_cache_directory()
-
-    # rule_paths may contain directory paths,
-    # so search for file paths recursively.
-    rule_file_paths = collect_rule_file_paths(rule_paths)
-
-    # this list is parallel to `rule_file_paths`:
-    # rule_file_paths[i] corresponds to rule_contents[i].
-    rule_contents = []
-    for file_path in rule_file_paths:
-        with open(file_path, "rb") as f:
-            rule_contents.append(f.read())
-
-    ruleset = capa.rules.cache.load_cached_ruleset(cache_dir, rule_contents)
-    if ruleset is not None:
-        return ruleset
-
-    rules = []  # type: List[Rule]
-
-    total_rule_count = len(rule_file_paths)
-    for i, (path, content) in enumerate(zip(rule_file_paths, rule_contents)):
-        on_load_rule(path, i, total_rule_count)
-
-        try:
-            rule = capa.rules.Rule.from_yaml(content.decode("utf-8"))
-        except capa.rules.InvalidRule:
-            raise
-        else:
-            rule.meta["capa/path"] = path
-            if is_nursery_rule_path(path):
-                rule.meta["capa/nursery"] = True
-
-            rules.append(rule)
-            logger.debug("loaded rule: '%s' with scope: %s", rule.name, rule.scope)
-
-    ruleset = capa.rules.RuleSet(rules)
-
-    capa.rules.cache.cache_ruleset(cache_dir, ruleset)
-
-    return ruleset
-
-
-def get_signatures(sigs_path):
-    if not os.path.exists(sigs_path):
-        raise IOError(f"signatures path {sigs_path} does not exist or cannot be accessed")
-
-    paths = []
-    if os.path.isfile(sigs_path):
-        paths.append(sigs_path)
-    elif os.path.isdir(sigs_path):
-        logger.debug("reading signatures from directory %s", os.path.abspath(os.path.normpath(sigs_path)))
-        for root, _, files in os.walk(sigs_path):
-            for file in files:
-                if file.endswith((".pat", ".pat.gz", ".sig")):
-                    sig_path = os.path.join(root, file)
-                    paths.append(sig_path)
-
-    # nicely normalize and format path so that debugging messages are clearer
-    paths = [os.path.abspath(os.path.normpath(path)) for path in paths]
-
-    # load signatures in deterministic order: the alphabetic sorting of filename.
-    # this means that `0_sigs.pat` loads before `1_sigs.pat`.
-    paths = sorted(paths, key=os.path.basename)
-
-    for path in paths:
-        logger.debug("found signature file: %s", path)
-
-    return paths
-
-
-def collect_metadata(
-    argv: List[str],
-    sample_path: str,
-    format_: str,
-    os_: str,
-    rules_path: List[str],
-    extractor: capa.features.extractors.base_extractor.FeatureExtractor,
+def simple_message_exception_handler(
+    exctype: type[BaseException], value: BaseException, traceback: TracebackType | None
 ):
-    md5 = hashlib.md5()
-    sha1 = hashlib.sha1()
-    sha256 = hashlib.sha256()
-
-    with open(sample_path, "rb") as f:
-        buf = f.read()
-
-    md5.update(buf)
-    sha1.update(buf)
-    sha256.update(buf)
-
-    if rules_path != [RULES_PATH_DEFAULT_STRING]:
-        rules_path = [os.path.abspath(os.path.normpath(r)) for r in rules_path]
-
-    format_ = get_format(sample_path) if format_ == FORMAT_AUTO else format_
-    arch = get_arch(sample_path)
-    os_ = get_os(sample_path) if os_ == OS_AUTO else os_
-
-    return {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "version": capa.version.__version__,
-        "argv": argv,
-        "sample": {
-            "md5": md5.hexdigest(),
-            "sha1": sha1.hexdigest(),
-            "sha256": sha256.hexdigest(),
-            "path": os.path.normpath(sample_path),
-        },
-        "analysis": {
-            "format": format_,
-            "arch": arch,
-            "os": os_,
-            "extractor": extractor.__class__.__name__,
-            "rules": rules_path,
-            "base_address": extractor.get_base_address(),
-            "layout": {
-                # this is updated after capabilities have been collected.
-                # will look like:
-                #
-                # "functions": { 0x401000: { "matched_basic_blocks": [ 0x401000, 0x401005, ... ] }, ... }
-            },
-        },
-    }
-
-
-def compute_layout(rules, extractor, capabilities):
     """
-    compute a metadata structure that links basic blocks
-    to the functions in which they're found.
-
-    only collect the basic blocks at which some rule matched.
-    otherwise, we may pollute the json document with
-    a large amount of un-referenced data.
+    prints friendly message on unexpected exceptions to regular users (debug mode shows regular stack trace)
     """
-    functions_by_bb: Dict[Address, Address] = {}
-    bbs_by_function: Dict[Address, List[Address]] = {}
-    for f in extractor.get_functions():
-        bbs_by_function[f.address] = []
-        for bb in extractor.get_basic_blocks(f):
-            functions_by_bb[bb.address] = f.address
-            bbs_by_function[f.address].append(bb.address)
 
-    matched_bbs = set()
-    for rule_name, matches in capabilities.items():
-        rule = rules[rule_name]
-        if rule.meta.get("scope") == capa.rules.BASIC_BLOCK_SCOPE:
-            for addr, _ in matches:
-                assert addr in functions_by_bb
-                matched_bbs.add(addr)
-
-    layout = {
-        "functions": {
-            f: {
-                "matched_basic_blocks": [bb for bb in bbs if bb in matched_bbs]
-                # this object is open to extension in the future,
-                # such as with the function name, etc.
-            }
-            for f, bbs in bbs_by_function.items()
-        }
-    }
-
-    return layout
+    if exctype is KeyboardInterrupt:
+        print("KeyboardInterrupt detected, program terminated", file=sys.stderr)
+    else:
+        print(
+            f"Unexpected exception raised: {exctype}. Please run capa in debug mode (-d/--debug) "
+            + "to see the stack trace.\nPlease also report your issue on the capa GitHub page so we "
+            + "can improve the code! (https://github.com/mandiant/capa/issues)",
+            file=sys.stderr,
+        )
 
 
 def install_common_args(parser, wanted=None):
     """
     register a common set of command line arguments for re-use by main & scripts.
     these are things like logging/coloring/etc.
-    also enable callers to opt-in to common arguments, like specifying the input sample.
+    also enable callers to opt-in to common arguments, like specifying the input file.
 
     this routine lets many script use the same language for cli arguments.
     see `handle_common_args` to do common configuration.
 
     args:
       parser (argparse.ArgumentParser): a parser to update in place, adding common arguments.
-      wanted (Set[str]): collection of arguments to opt-into, including:
-        - "sample": required positional argument to input file.
+      wanted (set[str]): collection of arguments to opt-into, including:
+        - "input_file": required positional argument to input file.
         - "format": flag to override file format.
         - "os": flag to override file operating system.
         - "backend": flag to override analysis backend.
@@ -831,21 +252,11 @@ def install_common_args(parser, wanted=None):
         help="enable ANSI color codes in results, default: only during interactive session",
     )
 
-    #
-    # arguments that may be opted into:
-    #
-    #   - sample
-    #   - format
-    #   - os
-    #   - rules
-    #   - tag
-    #
-
-    if "sample" in wanted:
+    if "input_file" in wanted:
         parser.add_argument(
-            "sample",
+            "input_file",
             type=str,
-            help="path to sample to analyze",
+            help="path to file to analyze",
         )
 
     if "format" in wanted:
@@ -856,25 +267,61 @@ def install_common_args(parser, wanted=None):
             (FORMAT_ELF, "Executable and Linkable Format"),
             (FORMAT_SC32, "32-bit shellcode"),
             (FORMAT_SC64, "64-bit shellcode"),
+            (FORMAT_CAPE, "CAPE sandbox report"),
+            (FORMAT_DRAKVUF, "DRAKVUF sandbox report"),
+            (FORMAT_VMRAY, "VMRay sandbox report"),
             (FORMAT_FREEZE, "features previously frozen by capa"),
+            (FORMAT_BINEXPORT2, "BinExport2"),
+            (FORMAT_BINJA_DB, "Binary Ninja Database"),
         ]
         format_help = ", ".join([f"{f[0]}: {f[1]}" for f in formats])
+
         parser.add_argument(
             "-f",
             "--format",
             choices=[f[0] for f in formats],
             default=FORMAT_AUTO,
-            help=f"select sample format, {format_help}",
+            help=f"select input format, {format_help}",
         )
 
     if "backend" in wanted:
+        backends = [
+            (BACKEND_AUTO, "(default) detect appropriate backend automatically"),
+            (BACKEND_VIV, "vivisect"),
+            (BACKEND_IDA, "IDA via idalib"),
+            (BACKEND_PEFILE, "pefile (file features only)"),
+            (BACKEND_BINJA, "Binary Ninja"),
+            (BACKEND_DOTNET, ".NET"),
+            (BACKEND_BINEXPORT2, "BinExport2"),
+            (BACKEND_FREEZE, "capa freeze"),
+            (BACKEND_CAPE, "CAPE"),
+            (BACKEND_DRAKVUF, "DRAKVUF"),
+            (BACKEND_VMRAY, "VMRay"),
+        ]
+        backend_help = ", ".join([f"{f[0]}: {f[1]}" for f in backends])
         parser.add_argument(
             "-b",
             "--backend",
             type=str,
-            help="select the backend to use",
-            choices=(BACKEND_VIV,),
-            default=BACKEND_VIV,
+            choices=[f[0] for f in backends],
+            default=BACKEND_AUTO,
+            help=f"select backend, {backend_help}",
+        )
+
+    if "restrict-to-functions" in wanted:
+        parser.add_argument(
+            "--restrict-to-functions",
+            type=lambda s: s.replace(" ", "").split(","),
+            default=[],
+            help="provide a list of comma-separated function virtual addresses to analyze (static analysis).",
+        )
+
+    if "restrict-to-processes" in wanted:
+        parser.add_argument(
+            "--restrict-to-processes",
+            type=lambda s: s.replace(" ", "").split(","),
+            default=[],
+            help="provide a list of comma-separated process IDs to analyze (dynamic analysis).",
         )
 
     if "os" in wanted:
@@ -884,12 +331,12 @@ def install_common_args(parser, wanted=None):
             (OS_MACOS,),
             (OS_WINDOWS,),
         ]
-        os_help = ", ".join(["%s (%s)" % (o[0], o[1]) if len(o) == 2 else o[0] for o in oses])
+        os_help = ", ".join([f"{o[0]} ({o[1]})" if len(o) == 2 else o[0] for o in oses])
         parser.add_argument(
             "--os",
             choices=[o[0] for o in oses],
             default=OS_AUTO,
-            help="select sample OS: %s" % os_help,
+            help=f"select sample OS: {os_help}",
         )
 
     if "rules" in wanted:
@@ -915,6 +362,34 @@ def install_common_args(parser, wanted=None):
         parser.add_argument("-t", "--tag", type=str, help="filter on rule meta field values")
 
 
+###############################################################################
+#
+# "main routines"
+#
+# All of the following routines are considered "main routines".
+# That is, they rely upon the given CLI arguments and write to output streams.
+# We prefer to keep as much logic away from input/output as possible;
+# however, capa does handle many combinations of flags/switches/overrides,
+# so these routines deal with that logic.
+#
+# Other scripts may use this routines, but should also prefer to invoke them
+# directly within `main()`, not within library code.
+# Library code should *not* call these functions.
+#
+# These main routines may raise `ShouldExitError` to indicate the program
+# ...should exit. It's a tiny step away from doing `sys.exit()` directly.
+# I'm not sure if we should just do that. In the meantime, programs should
+# handle `ShouldExitError` and pass the status code to `sys.exit()`.
+#
+
+
+class ShouldExitError(Exception):
+    """raised when a main-related routine indicates the program should exit."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
 def handle_common_args(args):
     """
     handle the global config specified by `install_common_args`,
@@ -923,31 +398,51 @@ def handle_common_args(args):
       - rules: file system path to rule files.
       - signatures: file system path to signature files.
 
-    the following field may be added:
+    the following fields may be added:
       - is_default_rules: if the default rules were used.
+      - is_default_signatures: if the default signatures were used.
 
     args:
-      args (argparse.Namespace): parsed arguments that included at least `install_common_args` args.
+      args: The parsed command line arguments from `install_common_args`.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
     """
     if args.quiet:
-        logging.basicConfig(level=logging.WARNING)
         logging.getLogger().setLevel(logging.WARNING)
     elif args.debug:
-        logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
     else:
-        logging.basicConfig(level=logging.INFO)
         logging.getLogger().setLevel(logging.INFO)
+
+    # use [/] after the logger name to reset any styling,
+    # and prevent the color from carrying over to the message
+    logformat = "[dim]%(name)s[/]: %(message)s"
+
+    # set markup=True to allow the use of Rich's markup syntax in log messages
+    rich_handler = RichHandler(markup=True, show_time=False, show_path=True, console=capa.helpers.log_console)
+    rich_handler.setFormatter(logging.Formatter(logformat))
+
+    # use RichHandler for root logger
+    logging.getLogger().addHandler(rich_handler)
 
     # disable vivisect-related logging, it's verbose and not relevant for capa users
     set_vivisect_log_level(logging.CRITICAL)
 
-    # Since Python 3.8 cp65001 is an alias to utf_8, but not for Python < 3.8
-    # TODO: remove this code when only supporting Python 3.8+
-    # https://stackoverflow.com/a/3259271/87207
-    import codecs
-
-    codecs.register(lambda name: codecs.lookup("utf-8") if name == "cp65001" else None)
+    if isinstance(sys.stdout, io.TextIOWrapper) or hasattr(sys.stdout, "reconfigure"):
+        # from sys.stdout type hint:
+        #
+        # TextIO is used instead of more specific types for the standard streams,
+        # since they are often monkeypatched at runtime. At startup, the objects
+        # are initialized to instances of TextIOWrapper.
+        #
+        # To use methods from TextIOWrapper, use an isinstance check to ensure that
+        # the streams have not been overridden:
+        #
+        # if isinstance(sys.stdout, io.TextIOWrapper):
+        #    sys.stdout.reconfigure(...)
+        sys.stdout.reconfigure(encoding="utf-8")
+    colorama.just_fix_windows_console()
 
     if args.color == "always":
         colorama.init(strip=False)
@@ -962,35 +457,44 @@ def handle_common_args(args):
     else:
         raise RuntimeError("unexpected --color value: " + args.color)
 
+    if not args.debug:
+        sys.excepthook = simple_message_exception_handler
+
+    if hasattr(args, "input_file"):
+        args.input_file = Path(args.input_file)
+
     if hasattr(args, "rules"):
-        rules_paths: List[str] = []
+        rules_paths: list[Path] = []
 
         if args.rules == [RULES_PATH_DEFAULT_STRING]:
             logger.debug("-" * 80)
             logger.debug(" Using default embedded rules.")
-            logger.debug(" To provide your own rules, use the form `capa.exe -r ./path/to/rules/  /path/to/mal.exe`.")
+            logger.debug(" To provide your own rules, use the form:")
+            logger.debug("")
+            logger.debug("     `capa.exe -r ./path/to/rules/  /path/to/mal.exe`.")
+            logger.debug("")
             logger.debug(" You can see the current default rule set here:")
+            logger.debug("")
             logger.debug("     https://github.com/mandiant/capa-rules")
             logger.debug("-" * 80)
 
-            default_rule_path = os.path.join(get_default_root(), "rules")
+            default_rule_path = get_default_root() / "rules"
 
-            if not os.path.exists(default_rule_path):
+            if not default_rule_path.exists():
                 # when a users installs capa via pip,
                 # this pulls down just the source code - not the default rules.
                 # i'm not sure the default rules should even be written to the library directory,
                 # so in this case, we require the user to use -r to specify the rule directory.
                 logger.error("default embedded rules not found! (maybe you installed capa as a library?)")
                 logger.error("provide your own rule set via the `-r` option.")
-                return E_MISSING_RULES
+                raise ShouldExitError(E_MISSING_RULES)
 
             rules_paths.append(default_rule_path)
             args.is_default_rules = True
         else:
-            rules_paths = args.rules
-
-            if RULES_PATH_DEFAULT_STRING in rules_paths:
-                rules_paths.remove(RULES_PATH_DEFAULT_STRING)
+            for rule in args.rules:
+                if RULES_PATH_DEFAULT_STRING != rule:
+                    rules_paths.append(Path(rule))
 
             for rule_path in rules_paths:
                 logger.debug("using rules path: %s", rule_path)
@@ -1001,24 +505,405 @@ def handle_common_args(args):
 
     if hasattr(args, "signatures"):
         if args.signatures == SIGNATURES_PATH_DEFAULT_STRING:
-            logger.debug("-" * 80)
-            logger.debug(" Using default embedded signatures.")
-            logger.debug(
-                " To provide your own signatures, use the form `capa.exe --signature ./path/to/signatures/  /path/to/mal.exe`."
-            )
-            logger.debug("-" * 80)
-
-            sigs_path = os.path.join(get_default_root(), "sigs")
+            sigs_path = get_default_root() / "sigs"
+            args.is_default_signatures = True
         else:
-            sigs_path = args.signatures
-            logger.debug("using signatures path: %s", sigs_path)
+            sigs_path = Path(args.signatures)
+            args.is_default_signatures = False
 
         args.signatures = sigs_path
 
 
-def main(argv=None):
-    if sys.version_info < (3, 7):
-        raise UnsupportedRuntimeError("This version of capa can only be used with Python 3.7+")
+def ensure_input_exists_from_cli(args):
+    """
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    try:
+        _ = get_file_taste(args.input_file)
+    except IOError as e:
+        # per our research there's not a programmatic way to render the IOError with non-ASCII filename unless we
+        # handle the IOError separately and reach into the args
+        logger.error("%s", e.args[0])
+        raise ShouldExitError(E_MISSING_FILE) from e
+
+
+def get_input_format_from_cli(args) -> str:
+    """
+    Determine the format of the input file.
+
+    Note: this may not be the same as the format of the sample.
+    Cape, Freeze, etc. formats describe a sample without being the sample itself.
+
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    format_ = args.format
+
+    if format_ != FORMAT_AUTO:
+        return format_
+
+    try:
+        return get_auto_format(args.input_file)
+    except PEFormatError as e:
+        logger.error("Input file '%s' is not a valid PE file: %s", args.input_file, str(e))
+        raise ShouldExitError(E_CORRUPT_FILE) from e
+    except UnsupportedFormatError as e:
+        log_unsupported_format_error()
+        raise ShouldExitError(E_INVALID_FILE_TYPE) from e
+
+
+def get_backend_from_cli(args, input_format: str) -> str:
+    """
+    Determine the backend that should be used for the given input file.
+    Respects an override provided by the user, otherwise, use a good default.
+
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+      input_format: The file format of the input file.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    if args.backend != BACKEND_AUTO:
+        return args.backend
+
+    if input_format == FORMAT_CAPE:
+        return BACKEND_CAPE
+
+    if input_format == FORMAT_DRAKVUF:
+        return BACKEND_DRAKVUF
+
+    elif input_format == FORMAT_VMRAY:
+        return BACKEND_VMRAY
+
+    elif input_format == FORMAT_DOTNET:
+        return BACKEND_DOTNET
+
+    elif input_format == FORMAT_FREEZE:
+        return BACKEND_FREEZE
+
+    elif input_format == FORMAT_BINEXPORT2:
+        return BACKEND_BINEXPORT2
+
+    else:
+        return BACKEND_VIV
+
+
+def get_sample_path_from_cli(args, backend: str) -> Optional[Path]:
+    """
+    Determine the path to the underlying sample, if it exists.
+
+    Note: this may not be the same as the input file.
+    Cape, Freeze, etc. formats describe a sample without being the sample itself.
+
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+      backend: The backend that will handle the input file.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    if backend in (BACKEND_CAPE, BACKEND_DRAKVUF, BACKEND_VMRAY):
+        return None
+    elif backend == BACKEND_BINEXPORT2:
+        import capa.features.extractors.binexport2
+
+        be2 = capa.features.extractors.binexport2.get_binexport2(args.input_file)
+        return capa.features.extractors.binexport2.get_sample_from_binexport2(
+            args.input_file, be2, [Path(os.environ.get("CAPA_SAMPLES_DIR", "."))]
+        )
+    else:
+        return args.input_file
+
+
+def get_os_from_cli(args, backend) -> str:
+    """
+    Determine the OS for the given sample.
+    Respects an override provided by the user, otherwise, use heuristics and
+    algorithms to detect the OS.
+
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+      backend: The backend that will handle the input file.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    if args.os:
+        return args.os
+
+    sample_path = get_sample_path_from_cli(args, backend)
+    if sample_path is None:
+        return "unknown"
+    return capa.loader.get_os(sample_path)
+
+
+def get_rules_from_cli(args) -> RuleSet:
+    """
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    enable_cache: bool = True
+    try:
+        if capa.helpers.is_running_standalone() and args.is_default_rules:
+            cache_dir = get_default_root() / "cache"
+        else:
+            cache_dir = capa.rules.cache.get_default_cache_directory()
+
+        if capa.helpers.is_dev_environment():
+            # using the rules cache during development may result in unexpected errors, see #1898
+            enable_cache = capa.helpers.is_cache_newer_than_rule_code(cache_dir)
+            if not enable_cache:
+                logger.debug("not using cache. delete the cache file manually to use rule caching again")
+            else:
+                logger.debug("cache can be used, no potentially outdated cache files found")
+
+        rules = capa.rules.get_rules(args.rules, cache_dir=cache_dir, enable_cache=enable_cache)
+    except (IOError, capa.rules.InvalidRule, capa.rules.InvalidRuleSet) as e:
+        logger.error("%s", str(e))
+        logger.error(
+            "Make sure your file directory contains properly formatted capa rules. You can download the standard "  # noqa: G003 [logging statement uses +]
+            + "collection of capa rules from https://github.com/mandiant/capa-rules/releases."
+        )
+        logger.error(
+            "Please ensure you're using the rules that correspond to your major version of capa (%s)",
+            capa.version.get_major_version(),
+        )
+        logger.error(
+            "Or, for more details, see the rule set documentation here: %s",
+            "https://github.com/mandiant/capa/blob/master/doc/rules.md",
+        )
+        raise ShouldExitError(E_INVALID_RULE) from e
+
+    logger.debug(
+        "successfully loaded %s rules",
+        # during the load of the RuleSet, we extract subscope statements into their own rules
+        # that are subsequently `match`ed upon. this inflates the total rule count.
+        # so, filter out the subscope rules when reporting total number of loaded rules.
+        len(list(filter(lambda r: not (r.is_subscope_rule()), rules.rules.values()))),
+    )
+
+    if hasattr(args, "tag") and args.tag:
+        rules = rules.filter_rules_by_meta(args.tag)
+        logger.debug("selected %d rules", len(rules))
+        for i, r in enumerate(rules.rules, 1):
+            logger.debug(" %d. %s", i, r)
+
+    return rules
+
+
+def get_file_extractors_from_cli(args, input_format: str) -> list[FeatureExtractor]:
+    """
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+      input_format: The file format of the input file.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    # file feature extractors are pretty lightweight: they don't do any code analysis.
+    # so we can fairly quickly determine if the given file has "pure" file-scope rules
+    # that indicate a limitation (like "file is packed based on section names")
+    # and avoid doing a full code analysis on difficult/impossible binaries.
+    #
+    # this pass can inspect multiple file extractors, e.g., dotnet and pe to identify
+    # various limitations
+    try:
+        return capa.loader.get_file_extractors(args.input_file, input_format)
+    except PEFormatError as e:
+        logger.error("Input file '%s' is not a valid PE file: %s", args.input_file, str(e))
+        raise ShouldExitError(E_CORRUPT_FILE) from e
+    except (ELFError, OverflowError) as e:
+        logger.error("Input file '%s' is not a valid ELF file: %s", args.input_file, str(e))
+        raise ShouldExitError(E_CORRUPT_FILE) from e
+    except UnsupportedFormatError as e:
+        if input_format == FORMAT_CAPE:
+            log_unsupported_cape_report_error(str(e))
+        elif input_format == FORMAT_DRAKVUF:
+            log_unsupported_drakvuf_report_error(str(e))
+        elif input_format == FORMAT_VMRAY:
+            log_unsupported_vmray_report_error(str(e))
+        else:
+            log_unsupported_format_error()
+        raise ShouldExitError(E_INVALID_FILE_TYPE) from e
+    except EmptyReportError as e:
+        if input_format == FORMAT_CAPE:
+            log_empty_sandbox_report_error(str(e), sandbox_name="CAPE")
+            raise ShouldExitError(E_EMPTY_REPORT) from e
+        elif input_format == FORMAT_DRAKVUF:
+            log_empty_sandbox_report_error(str(e), sandbox_name="DRAKVUF")
+            raise ShouldExitError(E_EMPTY_REPORT) from e
+        else:
+            log_unsupported_format_error()
+            raise ShouldExitError(E_INVALID_FILE_TYPE) from e
+
+
+def find_file_limitations_from_cli(args, rules: RuleSet, file_extractors: list[FeatureExtractor]) -> bool:
+    """
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+
+    Dynamic feature extractors can handle packed samples and do not need to be considered here.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    found_file_limitation = False
+    for file_extractor in file_extractors:
+        try:
+            pure_file_capabilities, _ = find_file_capabilities(rules, file_extractor, {})
+        except PEFormatError as e:
+            logger.error("Input file '%s' is not a valid PE file: %s", args.input_file, str(e))
+            raise ShouldExitError(E_CORRUPT_FILE) from e
+        except (ELFError, OverflowError) as e:
+            logger.error("Input file '%s' is not a valid ELF file: %s", args.input_file, str(e))
+            raise ShouldExitError(E_CORRUPT_FILE) from e
+
+        # file limitations that rely on non-file scope won't be detected here.
+        # nor on FunctionName features, because pefile doesn't support this.
+        found_file_limitation = has_file_limitation(rules, pure_file_capabilities)
+        if found_file_limitation:
+            # bail if capa encountered file limitation e.g. a packed binary
+            # do show the output in verbose mode, though.
+            if not (args.verbose or args.vverbose or args.json):
+                logger.debug("file limitation short circuit, won't analyze fully.")
+                raise ShouldExitError(E_FILE_LIMITATION)
+    return found_file_limitation
+
+
+def get_signatures_from_cli(args, input_format: str, backend: str) -> list[Path]:
+    if backend != BACKEND_VIV:
+        logger.debug("skipping library code matching: only supported by the vivisect backend")
+        return []
+
+    if input_format != FORMAT_PE:
+        logger.debug("skipping library code matching: signatures only supports PE files")
+        return []
+
+    if args.is_default_signatures:
+        logger.debug("-" * 80)
+        logger.debug(" Using default embedded signatures.")
+        logger.debug(
+            " To provide your own signatures, use the form `capa.exe --signature ./path/to/signatures/  /path/to/mal.exe`."
+        )
+        logger.debug("-" * 80)
+
+        if not args.signatures.exists():
+            logger.error(
+                "Using default signature path, but it doesn't exist. "  # noqa: G003 [logging statement uses +]
+                + "Please install the signatures first: "
+                + "https://github.com/mandiant/capa/blob/master/doc/installation.md#method-2-using-capa-as-a-python-library."
+            )
+            raise IOError(f"signatures path {args.signatures} does not exist or cannot be accessed")
+    else:
+        logger.debug("using signatures path: %s", args.signatures)
+
+    try:
+        return capa.loader.get_signatures(args.signatures)
+    except IOError as e:
+        logger.error("%s", str(e))
+        raise ShouldExitError(E_INVALID_SIG) from e
+
+
+def get_extractor_from_cli(args, input_format: str, backend: str) -> FeatureExtractor:
+    """
+    args:
+      args: The parsed command line arguments from `install_common_args`.
+      input_format: The file format of the input file.
+      backend: The backend that will handle the input file.
+
+    raises:
+      ShouldExitError: if the program is invoked incorrectly and should exit.
+    """
+    sig_paths = get_signatures_from_cli(args, input_format, backend)
+
+    should_save_workspace = os.environ.get("CAPA_SAVE_WORKSPACE") not in ("0", "no", "NO", "n", None)
+
+    os_ = get_os_from_cli(args, backend)
+    sample_path = get_sample_path_from_cli(args, backend)
+    extractor_filters = get_extractor_filters_from_cli(args, input_format)
+
+    logger.debug("format:  %s", input_format)
+    logger.debug("backend: %s", backend)
+
+    try:
+        extractor = capa.loader.get_extractor(
+            args.input_file,
+            input_format,
+            os_,
+            backend,
+            sig_paths,
+            should_save_workspace=should_save_workspace,
+            disable_progress=args.quiet or args.debug,
+            sample_path=sample_path,
+        )
+        return apply_extractor_filters(extractor, extractor_filters)
+    except UnsupportedFormatError as e:
+        if input_format == FORMAT_CAPE:
+            log_unsupported_cape_report_error(str(e))
+        elif input_format == FORMAT_DRAKVUF:
+            log_unsupported_drakvuf_report_error(str(e))
+        elif input_format == FORMAT_VMRAY:
+            log_unsupported_vmray_report_error(str(e))
+        else:
+            log_unsupported_format_error()
+        raise ShouldExitError(E_INVALID_FILE_TYPE) from e
+    except UnsupportedArchError as e:
+        log_unsupported_arch_error()
+        raise ShouldExitError(E_INVALID_FILE_ARCH) from e
+    except UnsupportedOSError as e:
+        log_unsupported_os_error()
+        raise ShouldExitError(E_INVALID_FILE_OS) from e
+    except capa.loader.CorruptFile as e:
+        logger.error("Input file '%s' is not a valid file: %s", args.input_file, str(e))
+        raise ShouldExitError(E_CORRUPT_FILE) from e
+
+
+def get_extractor_filters_from_cli(args, input_format) -> FilterConfig:
+    if not hasattr(args, "restrict_to_processes") and not hasattr(args, "restrict_to_functions"):
+        # no processes or function filters were installed in the args
+        return {}
+
+    if input_format in STATIC_FORMATS:
+        if args.restrict_to_processes:
+            raise InvalidArgument("Cannot filter processes with static analysis.")
+        return {"functions": {int(addr, 0) for addr in args.restrict_to_functions}}
+    elif input_format in DYNAMIC_FORMATS:
+        if args.restrict_to_functions:
+            raise InvalidArgument("Cannot filter functions with dynamic analysis.")
+        return {"processes": {int(pid, 0) for pid in args.restrict_to_processes}}
+    else:
+        raise ShouldExitError(E_INVALID_INPUT_FORMAT)
+
+
+def apply_extractor_filters(extractor: FeatureExtractor, extractor_filters: FilterConfig):
+    if not any(extractor_filters.values()):
+        return extractor
+
+    # if the user specified extractor filters, then apply them here
+    if isinstance(extractor, StaticFeatureExtractor):
+        assert extractor_filters["functions"]
+        return FunctionFilter(extractor, extractor_filters["functions"])
+    elif isinstance(extractor, DynamicFeatureExtractor):
+        assert extractor_filters["processes"]
+        return ProcessFilter(extractor, extractor_filters["processes"])
+    else:
+        raise ShouldExitError(E_INVALID_FEATURE_EXTRACTOR)
+
+
+def main(argv: Optional[list[str]] = None):
+    if sys.version_info < (3, 10):
+        raise UnsupportedRuntimeError("This version of capa can only be used with Python 3.10+")
 
     if argv is None:
         argv = sys.argv[1:]
@@ -1029,6 +914,9 @@ def main(argv=None):
         By default, capa uses a default set of embedded rules.
         You can see the rule set here:
           https://github.com/mandiant/capa-rules
+
+        You can load capa JSON output to capa Explorer Web:
+          https://github.com/mandiant/capa/explorer
 
         To provide your own rule set, use the `-r` flag:
           capa  --rules /path/to/rules  suspicious.exe
@@ -1055,151 +943,70 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=desc, epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    install_common_args(parser, {"sample", "format", "backend", "os", "signatures", "rules", "tag"})
+    install_common_args(
+        parser,
+        {
+            "input_file",
+            "format",
+            "backend",
+            "os",
+            "signatures",
+            "rules",
+            "tag",
+            "restrict-to-functions",
+            "restrict-to-processes",
+        },
+    )
     parser.add_argument("-j", "--json", action="store_true", help="emit JSON instead of text")
     args = parser.parse_args(args=argv)
-    ret = handle_common_args(args)
-    if ret is not None and ret != 0:
-        return ret
 
     try:
-        _ = get_file_taste(args.sample)
-    except IOError as e:
-        # per our research there's not a programmatic way to render the IOError with non-ASCII filename unless we
-        # handle the IOError separately and reach into the args
-        logger.error("%s", e.args[0])
-        return E_MISSING_FILE
+        handle_common_args(args)
+        ensure_input_exists_from_cli(args)
+        input_format = get_input_format_from_cli(args)
+        rules = get_rules_from_cli(args)
+        found_file_limitation = False
+        if input_format in STATIC_FORMATS:
+            # only static extractors have file limitations
+            file_extractors = get_file_extractors_from_cli(args, input_format)
+            found_file_limitation = find_file_limitations_from_cli(args, rules, file_extractors)
+    except ShouldExitError as e:
+        return e.status_code
 
-    format_ = args.format
-    if format_ == FORMAT_AUTO:
+    meta: rdoc.Metadata
+    capabilities: MatchResults
+    counts: dict[str, Any]
+
+    if input_format == FORMAT_RESULT:
+        # result document directly parses into meta, capabilities
+        result_doc = capa.render.result_document.ResultDocument.from_file(args.input_file)
+        meta, capabilities = result_doc.to_capa()
+
+    else:
+        # all other formats we must create an extractor
+        # and use that to extract meta and capabilities
+
         try:
-            format_ = get_auto_format(args.sample)
-        except PEFormatError as e:
-            logger.error("Input file '%s' is not a valid PE file: %s", args.sample, str(e))
-            return E_CORRUPT_FILE
-        except UnsupportedFormatError:
-            log_unsupported_format_error()
-            return E_INVALID_FILE_TYPE
+            backend = get_backend_from_cli(args, input_format)
+            sample_path = get_sample_path_from_cli(args, backend)
+            if sample_path is None:
+                os_ = "unknown"
+            else:
+                os_ = capa.loader.get_os(sample_path)
+            extractor = get_extractor_from_cli(args, input_format, backend)
+        except ShouldExitError as e:
+            return e.status_code
 
-    try:
-        if is_running_standalone() and args.is_default_rules:
-            cache_dir = os.path.join(get_default_root(), "cache")
-        else:
-            cache_dir = capa.rules.cache.get_default_cache_directory()
+        capabilities, counts = find_capabilities(rules, extractor, disable_progress=args.quiet)
 
-        rules = get_rules(args.rules, cache_dir=cache_dir)
+        meta = capa.loader.collect_metadata(argv, args.input_file, input_format, os_, args.rules, extractor, counts)
+        meta.analysis.layout = capa.loader.compute_layout(rules, extractor, capabilities)
 
-        logger.debug(
-            "successfully loaded %s rules",
-            # during the load of the RuleSet, we extract subscope statements into their own rules
-            # that are subsequently `match`ed upon. this inflates the total rule count.
-            # so, filter out the subscope rules when reporting total number of loaded rules.
-            len(list(filter(lambda r: not r.is_subscope_rule(), rules.rules.values()))),
-        )
-        if args.tag:
-            rules = rules.filter_rules_by_meta(args.tag)
-            logger.debug("selected %d rules", len(rules))
-            for i, r in enumerate(rules.rules, 1):
-                # TODO don't display subscope rules?
-                logger.debug(" %d. %s", i, r)
-    except (IOError, capa.rules.InvalidRule, capa.rules.InvalidRuleSet) as e:
-        logger.error("%s", str(e))
-        logger.error(
-            "Make sure your file directory contains properly formatted capa rules. You can download the standard "
-            "collection of capa rules from https://github.com/mandiant/capa-rules/releases."
-        )
-        logger.error(
-            "Please ensure you're using the rules that correspond to your major version of capa (%s)",
-            capa.version.get_major_version(),
-        )
-        logger.error(
-            "Or, for more details, see the rule set documentation here: %s",
-            "https://github.com/mandiant/capa/blob/master/doc/rules.md",
-        )
-        return E_INVALID_RULE
-
-    # file feature extractors are pretty lightweight: they don't do any code analysis.
-    # so we can fairly quickly determine if the given file has "pure" file-scope rules
-    # that indicate a limitation (like "file is packed based on section names")
-    # and avoid doing a full code analysis on difficult/impossible binaries.
-    #
-    # this pass can inspect multiple file extractors, e.g., dotnet and pe to identify
-    # various limitations
-    try:
-        file_extractors = get_file_extractors(args.sample, format_)
-    except PEFormatError as e:
-        logger.error("Input file '%s' is not a valid PE file: %s", args.sample, str(e))
-        return E_CORRUPT_FILE
-    except (ELFError, OverflowError) as e:
-        logger.error("Input file '%s' is not a valid ELF file: %s", args.sample, str(e))
-        return E_CORRUPT_FILE
-
-    for file_extractor in file_extractors:
-        try:
-            pure_file_capabilities, _ = find_file_capabilities(rules, file_extractor, {})
-        except PEFormatError as e:
-            logger.error("Input file '%s' is not a valid PE file: %s", args.sample, str(e))
-            return E_CORRUPT_FILE
-        except (ELFError, OverflowError) as e:
-            logger.error("Input file '%s' is not a valid ELF file: %s", args.sample, str(e))
-            return E_CORRUPT_FILE
-
-        # file limitations that rely on non-file scope won't be detected here.
-        # nor on FunctionName features, because pefile doesn't support this.
-        if has_file_limitation(rules, pure_file_capabilities):
-            # bail if capa encountered file limitation e.g. a packed binary
+        if isinstance(extractor, StaticFeatureExtractor) and found_file_limitation:
+            # bail if capa's static feature extractor encountered file limitation e.g. a packed binary
             # do show the output in verbose mode, though.
             if not (args.verbose or args.vverbose or args.json):
-                logger.debug("file limitation short circuit, won't analyze fully.")
                 return E_FILE_LIMITATION
-
-    if format_ == FORMAT_FREEZE:
-        with open(args.sample, "rb") as f:
-            extractor = capa.features.freeze.load(f.read())
-    else:
-        try:
-            if format_ == FORMAT_PE:
-                sig_paths = get_signatures(args.signatures)
-            else:
-                sig_paths = []
-                logger.debug("skipping library code matching: only have native PE signatures")
-        except IOError as e:
-            logger.error("%s", str(e))
-            return E_INVALID_SIG
-
-        should_save_workspace = os.environ.get("CAPA_SAVE_WORKSPACE") not in ("0", "no", "NO", "n", None)
-
-        try:
-            extractor = get_extractor(
-                args.sample,
-                format_,
-                args.os,
-                args.backend,
-                sig_paths,
-                should_save_workspace,
-                disable_progress=args.quiet,
-            )
-        except UnsupportedFormatError:
-            log_unsupported_format_error()
-            return E_INVALID_FILE_TYPE
-        except UnsupportedArchError:
-            log_unsupported_arch_error()
-            return E_INVALID_FILE_ARCH
-        except UnsupportedOSError:
-            log_unsupported_os_error()
-            return E_INVALID_FILE_OS
-
-    meta = collect_metadata(argv, args.sample, args.format, args.os, args.rules, extractor)
-
-    capabilities, counts = find_capabilities(rules, extractor, disable_progress=args.quiet)
-    meta["analysis"].update(counts)
-    meta["analysis"]["layout"] = compute_layout(rules, extractor, capabilities)
-
-    if has_file_limitation(rules, capabilities):
-        # bail if capa encountered file limitation e.g. a packed binary
-        # do show the output in verbose mode, though.
-        if not (args.verbose or args.vverbose or args.json):
-            return E_FILE_LIMITATION
 
     if args.json:
         print(capa.render.json.render(meta, rules, capabilities))
@@ -1238,14 +1045,16 @@ def ida_main():
     logger.debug("     https://github.com/mandiant/capa-rules")
     logger.debug("-" * 80)
 
-    rules_path = os.path.join(get_default_root(), "rules")
+    rules_path = get_default_root() / "rules"
     logger.debug("rule path: %s", rules_path)
-    rules = get_rules([rules_path])
+    rules = capa.rules.get_rules([rules_path])
 
     meta = capa.ida.helpers.collect_metadata([rules_path])
 
     capabilities, counts = find_capabilities(rules, capa.features.extractors.ida.extractor.IdaFeatureExtractor())
-    meta["analysis"].update(counts)
+
+    meta.analysis.feature_counts = counts["feature_counts"]
+    meta.analysis.library_functions = counts["library_functions"]
 
     if has_file_limitation(rules, capabilities, is_standalone=False):
         capa.ida.helpers.inform_user_ida_ui("capa encountered warnings during analysis")
@@ -1254,17 +1063,47 @@ def ida_main():
     print(capa.render.default.render(meta, rules, capabilities))
 
 
-def is_runtime_ida():
-    try:
-        import idc
-    except ImportError:
-        return False
-    else:
-        return True
+def ghidra_main():
+    import capa.rules
+    import capa.ghidra.helpers
+    import capa.render.default
+    import capa.features.extractors.ghidra.extractor
+
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger().setLevel(logging.INFO)
+
+    logger.debug("-" * 80)
+    logger.debug(" Using default embedded rules.")
+    logger.debug(" ")
+    logger.debug(" You can see the current default rule set here:")
+    logger.debug("     https://github.com/mandiant/capa-rules")
+    logger.debug("-" * 80)
+
+    rules_path = get_default_root() / "rules"
+    logger.debug("rule path: %s", rules_path)
+    rules = capa.rules.get_rules([rules_path])
+
+    meta = capa.ghidra.helpers.collect_metadata([rules_path])
+
+    capabilities, counts = find_capabilities(
+        rules,
+        capa.features.extractors.ghidra.extractor.GhidraFeatureExtractor(),
+        not capa.ghidra.helpers.is_running_headless(),
+    )
+
+    meta.analysis.feature_counts = counts["feature_counts"]
+    meta.analysis.library_functions = counts["library_functions"]
+
+    if has_file_limitation(rules, capabilities, is_standalone=False):
+        logger.info("capa encountered warnings during analysis")
+
+    print(capa.render.default.render(meta, rules, capabilities))
 
 
 if __name__ == "__main__":
-    if is_runtime_ida():
+    if capa.helpers.is_runtime_ida():
         ida_main()
+    elif capa.helpers.is_runtime_ghidra():
+        ghidra_main()
     else:
         sys.exit(main())

@@ -1,10 +1,17 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import abc
 from typing import Union, Optional
 
@@ -53,6 +60,15 @@ class Property(_AccessFeature):
 
 class Number(Feature):
     def __init__(self, value: Union[int, float], description=None):
+        """
+        args:
+          value (int or float): positive or negative integer, or floating point number.
+
+        the range of the value is:
+          - if positive, the range of u64
+          - if negative, the range of i64
+          - if floating, the range and precision of double
+        """
         super().__init__(value, description=description)
 
     def get_value_str(self):
@@ -61,7 +77,7 @@ class Number(Feature):
         elif isinstance(self.value, float):
             return str(self.value)
         else:
-            raise ValueError("invalid value type")
+            raise ValueError(f"invalid value type {type(self.value)}")
 
 
 # max recognized structure size (and therefore, offset size)
@@ -70,6 +86,14 @@ MAX_STRUCTURE_SIZE = 0x10000
 
 class Offset(Feature):
     def __init__(self, value: int, description=None):
+        """
+        args:
+          value (int): the offset, which can be positive or negative.
+
+        the range of the value is:
+          - if positive, the range of u64
+          - if negative, the range of i64
+        """
         super().__init__(value, description=description)
 
     def get_value_str(self):
@@ -83,16 +107,17 @@ class Mnemonic(Feature):
 
 
 # max number of operands to consider for a given instruction.
-# since we only support Intel and .NET, we can assume this is 3
+# for Intel and .NET, this is 3
 # which covers cases up to e.g. "vinserti128 ymm0,ymm0,ymm5,1"
-MAX_OPERAND_COUNT = 4
+# for ARM/aarch64, we assume 4
+MAX_OPERAND_COUNT = 5
 MAX_OPERAND_INDEX = MAX_OPERAND_COUNT - 1
 
 
 class _Operand(Feature, abc.ABC):
     # superclass: don't use directly
     # subclasses should set self.name and provide the value string formatter
-    def __init__(self, index: int, value: int, description=None):
+    def __init__(self, index: int, value: Union[int, float], description=None):
         super().__init__(value, description=description)
         self.index = index
 
@@ -108,13 +133,26 @@ class OperandNumber(_Operand):
     NAMES = [f"operand[{i}].number" for i in range(MAX_OPERAND_COUNT)]
 
     # operand[i].number: 0x12
-    def __init__(self, index: int, value: int, description=None):
+    def __init__(self, index: int, value: Union[int, float], description=None):
+        """
+        args:
+          value (int or float): positive or negative integer, or floating point number.
+
+        the range of the value is:
+          - if positive, the range of u64
+          - if negative, the range of i64
+          - if floating, the range and precision of double
+        """
         super().__init__(index, value, description=description)
         self.name = self.NAMES[index]
 
     def get_value_str(self) -> str:
-        assert isinstance(self.value, int)
-        return hex(self.value)
+        if isinstance(self.value, int):
+            return capa.helpers.hex(self.value)
+        elif isinstance(self.value, float):
+            return str(self.value)
+        else:
+            raise ValueError("invalid value type")
 
 
 class OperandOffset(_Operand):
@@ -123,6 +161,14 @@ class OperandOffset(_Operand):
 
     # operand[i].offset: 0x12
     def __init__(self, index: int, value: int, description=None):
+        """
+        args:
+          value (int): the offset, which can be positive or negative.
+
+        the range of the value is:
+          - if positive, the range of u64
+          - if negative, the range of i64
+        """
         super().__init__(index, value, description=description)
         self.name = self.NAMES[index]
 

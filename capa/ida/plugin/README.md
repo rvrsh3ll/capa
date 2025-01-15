@@ -81,6 +81,7 @@ can update using the `Settings` button.
 * Double-click the `Address` column to navigate your Disassembly view to the address of the associated feature
 * Double-click a result in the `Rule Information` column to expand its children
 * Select a checkbox in the `Rule Information` column to highlight the address of the associated feature in your Disassembly view
+* Reanalyze if you renamed global variables that store dynamically resolved APIs. capa will use these to improve its analysis.
 
 #### Tips for Rule Generator
 
@@ -95,7 +96,7 @@ can update using the `Settings` button.
 
 ### Requirements
 
-capa explorer supports Python versions >= 3.7.x and IDA Pro versions >= 7.4. The following IDA Pro versions have been tested:
+capa explorer supports Python versions >= 3.10 and IDA Pro versions >= 7.4. The following IDA Pro versions have been tested:
 
 * IDA 7.4
 * IDA 7.5
@@ -104,8 +105,9 @@ capa explorer supports Python versions >= 3.7.x and IDA Pro versions >= 7.4. The
 * IDA 8.0
 * IDA 8.1
 * IDA 8.2
+* IDA 9.0
 
-capa explorer is however limited to the Python versions supported by your IDA installation (which may not include all Python versions >= 3.7.x).
+capa explorer is however limited to the Python versions supported by your IDA installation (which may not include all Python versions >= 3.10).
 
 If you encounter issues with your specific setup, please open a new [Issue](https://github.com/mandiant/capa/issues).
 

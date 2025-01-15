@@ -1,13 +1,20 @@
-# Copyright (C) 2020 Mandiant, Inc. All Rights Reserved.
+# Copyright 2020 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at: [package root]/LICENSE.txt
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and limitations under the License.
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 import collections
-from typing import Set, List, Deque, Tuple, Union, Optional
+from typing import Deque, Optional
 
 import envi
 import vivisect.const
@@ -28,7 +35,7 @@ FAR_BRANCH_MASK = envi.BR_PROC | envi.BR_DEREF | envi.BR_ARCH
 DESTRUCTIVE_MNEMONICS = ("mov", "lea", "pop", "xor")
 
 
-def get_previous_instructions(vw: VivWorkspace, va: int) -> List[int]:
+def get_previous_instructions(vw: VivWorkspace, va: int) -> list[int]:
     """
     collect the instructions that flow to the given address, local to the current function.
 
@@ -37,7 +44,7 @@ def get_previous_instructions(vw: VivWorkspace, va: int) -> List[int]:
       va (int): the virtual address to inspect
 
     returns:
-      List[int]: the prior instructions, which may fallthrough and/or jump here
+      list[int]: the prior instructions, which may fallthrough and/or jump here
     """
     ret = []
 
@@ -71,7 +78,7 @@ class NotFoundError(Exception):
     pass
 
 
-def find_definition(vw: VivWorkspace, va: int, reg: int) -> Tuple[int, Union[int, None]]:
+def find_definition(vw: VivWorkspace, va: int, reg: int) -> tuple[int, Optional[int]]:
     """
     scan backwards from the given address looking for assignments to the given register.
     if a constant, return that value.
@@ -87,8 +94,8 @@ def find_definition(vw: VivWorkspace, va: int, reg: int) -> Tuple[int, Union[int
     raises:
       NotFoundError: when the definition cannot be found.
     """
-    q = collections.deque()  # type: Deque[int]
-    seen = set([])  # type: Set[int]
+    q: Deque[int] = collections.deque()
+    seen: set[int] = set()
 
     q.extend(get_previous_instructions(vw, va))
     while q:
@@ -139,7 +146,7 @@ def is_indirect_call(vw: VivWorkspace, va: int, insn: envi.Opcode) -> bool:
     return insn.mnem in ("call", "jmp") and isinstance(insn.opers[0], envi.archs.i386.disasm.i386RegOper)
 
 
-def resolve_indirect_call(vw: VivWorkspace, va: int, insn: envi.Opcode) -> Tuple[int, Optional[int]]:
+def resolve_indirect_call(vw: VivWorkspace, va: int, insn: envi.Opcode) -> tuple[int, Optional[int]]:
     """
     inspect the given indirect call instruction and attempt to resolve the target address.
 

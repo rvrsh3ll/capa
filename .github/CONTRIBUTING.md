@@ -25,7 +25,7 @@ The following is a set of guidelines for contributing to capa and its packages, 
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the [Capa Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the maintainers.
+This project follows [Google's Open Source Community Guidelines](https://opensource.google/conduct).
 
 ## What should I know before I get started?
 
@@ -57,7 +57,7 @@ When we make a significant decision in how we maintain the project and what we c
  we will document it in the [capa issues tracker](https://github.com/mandiant/capa/issues).
 This is the best place review our discussions about what/how/why we do things in the project.
 If you have a question, check to see if it is documented there.
-If it is *not* documented there, or you can't find an answer, please open a issue.
+If it is *not* documented there, or you can't find an answer, please open an issue.
 We'll link to existing issues when appropriate to keep discussions in one place.
 
 ## How Can I Contribute?
@@ -159,11 +159,26 @@ The process described here has several goals:
 
 Please follow these steps to have your contribution considered by the maintainers:
 
+0. Sign the [Contributor License Agreement](#contributor-license-agreement)
 1. Follow the [styleguides](#styleguides)
 2. Update the CHANGELOG and add tests and documentation. In case they are not needed, indicate it in [the PR template](pull_request_template.md).
 3. After you submit your pull request, verify that all [status checks](https://help.github.com/articles/about-status-checks/) are passing <details><summary>What if the status checks are failing? </summary>If a status check is failing, and you believe that the failure is unrelated to your change, please leave a comment on the pull request explaining why you believe the failure is unrelated. A maintainer will re-run the status check for you. If we conclude that the failure was a false positive, then we will open an issue to track that problem with our status check suite.</details>
 
 While the prerequisites above must be satisfied prior to having your pull request reviewed, the reviewer(s) may ask you to complete additional design work, tests, or other changes before your pull request can be ultimately accepted.
+
+### Contributor License Agreement
+
+Contributions to this project must be accompanied by a
+[Contributor License Agreement](https://cla.developers.google.com/about) (CLA).
+You (or your employer) retain the copyright to your contribution; this simply
+gives us permission to use and redistribute your contributions as part of the
+project.
+
+If you or your current employer have already signed the Google CLA (even if it
+was for a different project), you probably don't need to do it again.
+
+Visit <https://cla.developers.google.com/> to see your current agreements or to
+sign a new one.
 
 ## Styleguides
 

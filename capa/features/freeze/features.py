@@ -1,7 +1,21 @@
-import binascii
-from typing import Union, Optional
+# Copyright 2022 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-from pydantic import Field, BaseModel
+import binascii
+from typing import Union, Literal, Optional, Annotated
+
+from pydantic import Field, BaseModel, ConfigDict
 
 import capa.features.file
 import capa.features.insn
@@ -10,9 +24,7 @@ import capa.features.basicblock
 
 
 class FeatureModel(BaseModel):
-    class Config:
-        frozen = True
-        allow_population_by_field_name = True
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     def to_capa(self) -> capa.features.common.Feature:
         if isinstance(self, OSFeature):
@@ -101,59 +113,79 @@ class FeatureModel(BaseModel):
 
 def feature_from_capa(f: capa.features.common.Feature) -> "Feature":
     if isinstance(f, capa.features.common.OS):
+        assert isinstance(f.value, str)
         return OSFeature(os=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.Arch):
+        assert isinstance(f.value, str)
         return ArchFeature(arch=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.Format):
+        assert isinstance(f.value, str)
         return FormatFeature(format=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.MatchedRule):
+        assert isinstance(f.value, str)
         return MatchFeature(match=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.Characteristic):
+        assert isinstance(f.value, str)
         return CharacteristicFeature(characteristic=f.value, description=f.description)
 
     elif isinstance(f, capa.features.file.Export):
+        assert isinstance(f.value, str)
         return ExportFeature(export=f.value, description=f.description)
 
     elif isinstance(f, capa.features.file.Import):
-        return ImportFeature(import_=f.value, description=f.description)
+        assert isinstance(f.value, str)
+        return ImportFeature(import_=f.value, description=f.description)  # type: ignore
+        # Mypy is unable to recognise `import_` as an argument due to alias
 
     elif isinstance(f, capa.features.file.Section):
+        assert isinstance(f.value, str)
         return SectionFeature(section=f.value, description=f.description)
 
     elif isinstance(f, capa.features.file.FunctionName):
-        return FunctionNameFeature(function_name=f.value, description=f.description)
+        assert isinstance(f.value, str)
+        return FunctionNameFeature(function_name=f.value, description=f.description)  # type: ignore
+        # Mypy is unable to recognise `function_name` as an argument due to alias
 
     # must come before check for String due to inheritance
     elif isinstance(f, capa.features.common.Substring):
+        assert isinstance(f.value, str)
         return SubstringFeature(substring=f.value, description=f.description)
 
     # must come before check for String due to inheritance
     elif isinstance(f, capa.features.common.Regex):
+        assert isinstance(f.value, str)
         return RegexFeature(regex=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.String):
+        assert isinstance(f.value, str)
         return StringFeature(string=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.Class):
-        return ClassFeature(class_=f.value, description=f.description)
+        assert isinstance(f.value, str)
+        return ClassFeature(class_=f.value, description=f.description)  # type: ignore
+        # Mypy is unable to recognise `class_` as an argument due to alias
 
     elif isinstance(f, capa.features.common.Namespace):
+        assert isinstance(f.value, str)
         return NamespaceFeature(namespace=f.value, description=f.description)
 
     elif isinstance(f, capa.features.basicblock.BasicBlock):
         return BasicBlockFeature(description=f.description)
 
     elif isinstance(f, capa.features.insn.API):
+        assert isinstance(f.value, str)
         return APIFeature(api=f.value, description=f.description)
 
     elif isinstance(f, capa.features.insn.Property):
+        assert isinstance(f.value, str)
         return PropertyFeature(property=f.value, access=f.access, description=f.description)
 
     elif isinstance(f, capa.features.insn.Number):
+        assert isinstance(f.value, (int, float))
         return NumberFeature(number=f.value, description=f.description)
 
     elif isinstance(f, capa.features.common.Bytes):
@@ -162,184 +194,193 @@ def feature_from_capa(f: capa.features.common.Feature) -> "Feature":
         return BytesFeature(bytes=binascii.hexlify(buf).decode("ascii"), description=f.description)
 
     elif isinstance(f, capa.features.insn.Offset):
+        assert isinstance(f.value, int)
         return OffsetFeature(offset=f.value, description=f.description)
 
     elif isinstance(f, capa.features.insn.Mnemonic):
+        assert isinstance(f.value, str)
         return MnemonicFeature(mnemonic=f.value, description=f.description)
 
     elif isinstance(f, capa.features.insn.OperandNumber):
-        return OperandNumberFeature(index=f.index, operand_number=f.value, description=f.description)
+        assert isinstance(f.value, int)
+        return OperandNumberFeature(index=f.index, operand_number=f.value, description=f.description)  # type: ignore
+        # Mypy is unable to recognise `operand_number` as an argument due to alias
 
     elif isinstance(f, capa.features.insn.OperandOffset):
-        return OperandOffsetFeature(index=f.index, operand_offset=f.value, description=f.description)
+        assert isinstance(f.value, int)
+        return OperandOffsetFeature(index=f.index, operand_offset=f.value, description=f.description)  # type: ignore
+        # Mypy is unable to recognise `operand_offset` as an argument due to alias
 
     else:
         raise NotImplementedError(f"feature_from_capa({type(f)}) not implemented")
 
 
 class OSFeature(FeatureModel):
-    type: str = "os"
+    type: Literal["os"] = "os"
     os: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class ArchFeature(FeatureModel):
-    type: str = "arch"
+    type: Literal["arch"] = "arch"
     arch: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class FormatFeature(FeatureModel):
-    type: str = "format"
+    type: Literal["format"] = "format"
     format: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class MatchFeature(FeatureModel):
-    type: str = "match"
+    type: Literal["match"] = "match"
     match: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class CharacteristicFeature(FeatureModel):
-    type: str = "characteristic"
+    type: Literal["characteristic"] = "characteristic"
     characteristic: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class ExportFeature(FeatureModel):
-    type: str = "export"
+    type: Literal["export"] = "export"
     export: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class ImportFeature(FeatureModel):
-    type: str = "import"
+    type: Literal["import"] = "import"
     import_: str = Field(alias="import")
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class SectionFeature(FeatureModel):
-    type: str = "section"
+    type: Literal["section"] = "section"
     section: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class FunctionNameFeature(FeatureModel):
-    type: str = "function name"
+    type: Literal["function name"] = "function name"
     function_name: str = Field(alias="function name")
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class SubstringFeature(FeatureModel):
-    type: str = "substring"
+    type: Literal["substring"] = "substring"
     substring: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class RegexFeature(FeatureModel):
-    type: str = "regex"
+    type: Literal["regex"] = "regex"
     regex: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class StringFeature(FeatureModel):
-    type: str = "string"
+    type: Literal["string"] = "string"
     string: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class ClassFeature(FeatureModel):
-    type: str = "class"
+    type: Literal["class"] = "class"
     class_: str = Field(alias="class")
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class NamespaceFeature(FeatureModel):
-    type: str = "namespace"
+    type: Literal["namespace"] = "namespace"
     namespace: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class BasicBlockFeature(FeatureModel):
-    type: str = "basic block"
-    description: Optional[str]
+    type: Literal["basic block"] = "basic block"
+    description: Optional[str] = None
 
 
 class APIFeature(FeatureModel):
-    type: str = "api"
+    type: Literal["api"] = "api"
     api: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class PropertyFeature(FeatureModel):
-    type: str = "property"
-    access: Optional[str]
+    type: Literal["property"] = "property"
+    access: Optional[str] = None
     property: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class NumberFeature(FeatureModel):
-    type: str = "number"
+    type: Literal["number"] = "number"
     number: Union[int, float]
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class BytesFeature(FeatureModel):
-    type: str = "bytes"
+    type: Literal["bytes"] = "bytes"
     bytes: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class OffsetFeature(FeatureModel):
-    type: str = "offset"
+    type: Literal["offset"] = "offset"
     offset: int
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class MnemonicFeature(FeatureModel):
-    type: str = "mnemonic"
+    type: Literal["mnemonic"] = "mnemonic"
     mnemonic: str
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class OperandNumberFeature(FeatureModel):
-    type: str = "operand number"
+    type: Literal["operand number"] = "operand number"
     index: int
     operand_number: int = Field(alias="operand number")
-    description: Optional[str]
+    description: Optional[str] = None
 
 
 class OperandOffsetFeature(FeatureModel):
-    type: str = "operand offset"
+    type: Literal["operand offset"] = "operand offset"
     index: int
     operand_offset: int = Field(alias="operand offset")
-    description: Optional[str]
+    description: Optional[str] = None
 
 
-Feature = Union[
-    OSFeature,
-    ArchFeature,
-    FormatFeature,
-    MatchFeature,
-    CharacteristicFeature,
-    ExportFeature,
-    ImportFeature,
-    SectionFeature,
-    FunctionNameFeature,
-    SubstringFeature,
-    RegexFeature,
-    StringFeature,
-    ClassFeature,
-    NamespaceFeature,
-    APIFeature,
-    PropertyFeature,
-    NumberFeature,
-    BytesFeature,
-    OffsetFeature,
-    MnemonicFeature,
-    OperandNumberFeature,
-    OperandOffsetFeature,
-    # Note! this must be last, see #1161
-    BasicBlockFeature,
+Feature = Annotated[
+    Union[
+        OSFeature,
+        ArchFeature,
+        FormatFeature,
+        MatchFeature,
+        CharacteristicFeature,
+        ExportFeature,
+        ImportFeature,
+        SectionFeature,
+        FunctionNameFeature,
+        SubstringFeature,
+        RegexFeature,
+        StringFeature,
+        ClassFeature,
+        NamespaceFeature,
+        APIFeature,
+        PropertyFeature,
+        NumberFeature,
+        BytesFeature,
+        OffsetFeature,
+        MnemonicFeature,
+        OperandNumberFeature,
+        OperandOffsetFeature,
+        # Note! this must be last, see #1161
+        BasicBlockFeature,
+    ],
+    Field(discriminator="type"),
 ]
